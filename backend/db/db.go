@@ -129,6 +129,16 @@ CREATE TABLE IF NOT EXISTS asset_daily_values (
 -- Add asset_id link to transactions (nullable for backward compatibility).
 ALTER TABLE transactions ADD COLUMN IF NOT EXISTS asset_id INTEGER REFERENCES assets(id) ON DELETE SET NULL;
 
+-- Investment transaction columns (nullable, backward-compatible).
+-- subtype: 'stock_buy' | 'stock_sell' | 'dividend' | 'fee'
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS subtype  TEXT;
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS symbol   TEXT;
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS quantity NUMERIC(18,8);
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS price    NUMERIC(18,4);
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS market   TEXT;
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS tx_fee   NUMERIC(18,4);
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS tx_tax   NUMERIC(18,4);
+
 -- Legacy portfolio_positions table (renamed from old assets).
 -- Created only when the DO $$ block above could not rename (fresh DB).
 CREATE TABLE IF NOT EXISTS portfolio_positions (

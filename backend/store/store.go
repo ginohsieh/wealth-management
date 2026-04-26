@@ -15,15 +15,24 @@ Balance  float64 `json:"balance"`
 Currency string  `json:"currency"`
 }
 
-// Transaction represents a financial transaction
+// Transaction represents a financial transaction.
+// For investment trades set Subtype to "stock_buy" or "stock_sell" and fill
+// Symbol, Quantity, Price, Market. Fee and Tax are auto-calculated when left 0.
 type Transaction struct {
-ID          string  `json:"id"`
-AccountID   string  `json:"account_id"`
-Date        string  `json:"date"`
-Description string  `json:"description"`
-Amount      float64 `json:"amount"`
-Category    string  `json:"category"`
-Type        string  `json:"type"` // income, expense
+ID          string   `json:"id"`
+AccountID   string   `json:"account_id"`
+Date        string   `json:"date"`
+Description string   `json:"description"`
+Amount      float64  `json:"amount"`
+Category    string   `json:"category"`
+Type        string   `json:"type"`    // income, expense
+Subtype     string   `json:"subtype"` // stock_buy, stock_sell, dividend, fee, ""
+Symbol      string   `json:"symbol,omitempty"`
+Quantity    *float64 `json:"quantity,omitempty"`
+Price       *float64 `json:"price,omitempty"`
+Market      string   `json:"market,omitempty"`
+Fee         *float64 `json:"fee,omitempty"`
+Tax         *float64 `json:"tax,omitempty"`
 }
 
 // PortfolioPosition represents an investment holding in the legacy flat model.
@@ -243,14 +252,14 @@ return n > 0, nil
 func GetTransactions(accountID string) ([]Transaction, error) {
 var rows *sql.Rows
 var err error
+q := `SELECT id, account_id, date, description, amount, category, type,
+             COALESCE(subtype,''), COALESCE(symbol,''), quantity, price,
+             COALESCE(market,''), tx_fee, tx_tax
+      FROM transactions`
 if accountID == "" {
-rows, err = db.Query(
-`SELECT id, account_id, date, description, amount, category, type
- FROM transactions ORDER BY id`)
+rows, err = db.Query(q + ` ORDER BY id`)
 } else {
-rows, err = db.Query(
-`SELECT id, account_id, date, description, amount, category, type
- FROM transactions WHERE account_id=$1 ORDER BY id`, accountID)
+rows, err = db.Query(q+` WHERE account_id=$1 ORDER BY id`, accountID)
 }
 if err != nil {
 return nil, err
@@ -262,7 +271,9 @@ for rows.Next() {
 var t Transaction
 var id, accountIDInt int
 if err := rows.Scan(&id, &accountIDInt, &t.Date, &t.Description,
-&t.Amount, &t.Category, &t.Type); err != nil {
+&t.Amount, &t.Category, &t.Type,
+&t.Subtype, &t.Symbol, &t.Quantity, &t.Price,
+&t.Market, &t.Fee, &t.Tax); err != nil {
 return nil, err
 }
 t.ID = fmt.Sprintf("%d", id)
@@ -273,18 +284,53 @@ return result, rows.Err()
 }
 
 // CreateTransaction inserts a new transaction and returns it with a generated ID.
+// For stock_buy / stock_sell subtypes, fee and tax are auto-calculated from market
+// rules when the caller leaves them nil or zero.
 func CreateTransaction(t Transaction) (Transaction, error) {
+// Auto-calculate fee/tax for investment trades
+if t.Subtype == "stock_buy" || t.Subtype == "stock_sell" {
+if t.Quantity != nil && t.Price != nil {
+tradeValue := *t.Quantity * *t.Price
+autoFee, autoTax := CalcFeeAndTax(t.Market, map[string]string{"stock_buy": "buy", "stock_sell": "sell"}[t.Subtype], tradeValue)
+if t.Fee == nil || *t.Fee == 0 {
+t.Fee = &autoFee
+}
+if t.Tax == nil || *t.Tax == 0 {
+t.Tax = &autoTax
+}
+}
+}
+
 var id int
 err := db.QueryRow(
-`INSERT INTO transactions(account_id, date, description, amount, category, type)
- VALUES($1,$2,$3,$4,$5,$6) RETURNING id`,
+`INSERT INTO transactions(account_id, date, description, amount, category, type,
+                          subtype, symbol, quantity, price, market, tx_fee, tx_tax)
+ VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
 t.AccountID, t.Date, t.Description, t.Amount, t.Category, t.Type,
+nullableStr(t.Subtype), nullableStr(t.Symbol), t.Quantity, t.Price,
+nullableStr(t.Market), t.Fee, t.Tax,
 ).Scan(&id)
 if err != nil {
 return Transaction{}, err
 }
 t.ID = fmt.Sprintf("%d", id)
+
+// Seed symbol_prices so the holdings poller tracks this symbol
+if t.Symbol != "" && t.Price != nil {
+_, _ = db.Exec(
+`INSERT INTO symbol_prices(symbol, price) VALUES($1,$2) ON CONFLICT DO NOTHING`,
+t.Symbol, *t.Price,
+)
+}
 return t, nil
+}
+
+// nullableStr converts an empty string to nil for nullable SQL columns.
+func nullableStr(s string) interface{} {
+if s == "" {
+return nil
+}
+return s
 }
 
 // ── PortfolioPositions (legacy flat portfolio) ────────────────────────────────
@@ -690,23 +736,10 @@ symbol, name,
 return err
 }
 
-// computeHoldings loads trades and symbol prices from the DB and aggregates
-// them into per-symbol holdings. Optionally filtered by accountID.
+// computeHoldings aggregates per-symbol holdings from investment transactions
+// (subtype IN ('stock_buy','stock_sell')) and, for backward compatibility, also
+// from legacy portfolio_trades. Optionally filtered by accountID.
 func computeHoldings(accountID string) ([]Holding, error) {
-var rows *sql.Rows
-var err error
-if accountID == "" {
-rows, err = db.Query(
-`SELECT symbol, name, type, quantity, price, fee FROM portfolio_trades ORDER BY id`)
-} else {
-rows, err = db.Query(
-`SELECT symbol, name, type, quantity, price, fee FROM portfolio_trades WHERE account_id = $1 ORDER BY id`, accountID)
-}
-if err != nil {
-return nil, err
-}
-defer rows.Close()
-
 type accumulator struct {
 name         string
 buyQty       float64
@@ -716,27 +749,81 @@ sellQty      float64
 order := []string{}
 acc := map[string]*accumulator{}
 
-for rows.Next() {
-var sym, name, tradeType string
-var qty, price, fee float64
-if err := rows.Scan(&sym, &name, &tradeType, &qty, &price, &fee); err != nil {
-return nil, err
-}
+addRow := func(sym, name, tradeType string, qty, price, fee float64) {
 if _, exists := acc[sym]; !exists {
 acc[sym] = &accumulator{name: name}
 order = append(order, sym)
 }
 a := acc[sym]
 switch tradeType {
-case "buy":
+case "buy", "stock_buy":
 a.buyQty += qty
 a.buyTotalCost += qty*price + fee
-case "sell":
+case "sell", "stock_sell":
 a.sellQty += qty
 }
 }
+
+// 1. Investment transactions
+{
+q := `SELECT symbol, subtype, quantity, price, COALESCE(tx_fee,0)
+      FROM transactions
+      WHERE subtype IN ('stock_buy','stock_sell')
+        AND symbol IS NOT NULL AND quantity IS NOT NULL AND price IS NOT NULL`
+var rows *sql.Rows
+var err error
+if accountID == "" {
+rows, err = db.Query(q + ` ORDER BY id`)
+} else {
+rows, err = db.Query(q+` AND account_id=$1 ORDER BY id`, accountID)
+}
+if err != nil {
+return nil, err
+}
+defer rows.Close()
+for rows.Next() {
+var sym, subtype string
+var qty, price, fee float64
+if err := rows.Scan(&sym, &subtype, &qty, &price, &fee); err != nil {
+return nil, err
+}
+// resolve display name from symbol_names cache
+name := sym
+if cached, found, _ := GetSymbolName(sym); found {
+name = cached
+}
+addRow(sym, name, subtype, qty, price, fee)
+}
 if err := rows.Err(); err != nil {
 return nil, err
+}
+}
+
+// 2. Legacy portfolio_trades (kept for backward compatibility)
+{
+q := `SELECT symbol, name, type, quantity, price, fee FROM portfolio_trades`
+var rows *sql.Rows
+var err error
+if accountID == "" {
+rows, err = db.Query(q + ` ORDER BY id`)
+} else {
+rows, err = db.Query(q+` WHERE account_id=$1 ORDER BY id`, accountID)
+}
+if err != nil {
+return nil, err
+}
+defer rows.Close()
+for rows.Next() {
+var sym, name, tradeType string
+var qty, price, fee float64
+if err := rows.Scan(&sym, &name, &tradeType, &qty, &price, &fee); err != nil {
+return nil, err
+}
+addRow(sym, name, tradeType, qty, price, fee)
+}
+if err := rows.Err(); err != nil {
+return nil, err
+}
 }
 
 // Load symbol prices and last-updated timestamps
@@ -835,11 +922,17 @@ return Summary{}, err
 
 // Portfolio value — prefer trade-based holdings
 var portfolioValue float64
-var tradeCount int
-if err := db.QueryRow(`SELECT COUNT(*) FROM portfolio_trades`).Scan(&tradeCount); err != nil {
+var investCount int
+if err := db.QueryRow(
+`SELECT COUNT(*) FROM (
+   SELECT id FROM portfolio_trades
+   UNION ALL
+   SELECT id FROM transactions WHERE subtype IN ('stock_buy','stock_sell')
+ ) x`,
+).Scan(&investCount); err != nil {
 return Summary{}, err
 }
-if tradeCount > 0 {
+if investCount > 0 {
 holdings, err := computeHoldings("")
 if err != nil {
 return Summary{}, err
