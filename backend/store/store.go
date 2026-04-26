@@ -286,6 +286,7 @@ return result, rows.Err()
 // CreateTransaction inserts a new transaction and returns it with a generated ID.
 // For stock_buy / stock_sell subtypes, fee and tax are auto-calculated from market
 // rules when the caller leaves them nil or zero.
+// The linked account's balance is updated atomically in the same database transaction.
 func CreateTransaction(t Transaction) (Transaction, error) {
 // Auto-calculate fee/tax for investment trades
 if t.Subtype == "stock_buy" || t.Subtype == "stock_sell" {
@@ -301,8 +302,18 @@ t.Tax = &autoTax
 }
 }
 
+tx, err := db.Begin()
+if err != nil {
+return Transaction{}, err
+}
+defer func() {
+if err != nil {
+_ = tx.Rollback()
+}
+}()
+
 var id int
-err := db.QueryRow(
+err = tx.QueryRow(
 `INSERT INTO transactions(account_id, date, description, amount, category, type,
                           subtype, symbol, quantity, price, market, tx_fee, tx_tax)
  VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
@@ -313,6 +324,19 @@ nullableStr(t.Market), t.Fee, t.Tax,
 if err != nil {
 return Transaction{}, err
 }
+
+// Update account balance to reflect this transaction
+if _, err = tx.Exec(
+`UPDATE accounts SET balance = balance + $1 WHERE id = $2`,
+t.Amount, t.AccountID,
+); err != nil {
+return Transaction{}, err
+}
+
+if err = tx.Commit(); err != nil {
+return Transaction{}, err
+}
+
 t.ID = fmt.Sprintf("%d", id)
 
 // Seed symbol_prices so the holdings poller tracks this symbol
