@@ -141,7 +141,7 @@ return nil, err
 }
 defer rows.Close()
 
-var result []Account
+result := []Account{}
 for rows.Next() {
 var a Account
 var id int
@@ -236,7 +236,7 @@ return nil, err
 }
 defer rows.Close()
 
-var result []Transaction
+result := []Transaction{}
 for rows.Next() {
 var t Transaction
 var id, accountIDInt int
@@ -278,7 +278,7 @@ return nil, err
 }
 defer rows.Close()
 
-var result []Asset
+result := []Asset{}
 for rows.Next() {
 var a Asset
 var id int
@@ -397,7 +397,7 @@ return nil, err
 }
 defer rows.Close()
 
-var result []PortfolioTrade
+result := []PortfolioTrade{}
 for rows.Next() {
 var t PortfolioTrade
 var id int
@@ -708,7 +708,7 @@ return nil, err
 }
 defer rows.Close()
 
-var result []NetWorthSnapshot
+result := []NetWorthSnapshot{}
 for rows.Next() {
 var s NetWorthSnapshot
 var id int

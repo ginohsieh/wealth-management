@@ -40,7 +40,7 @@ export default function Transactions() {
       fetch(`${API}/api/accounts`).then(r => r.json()),
     ])
       .then(([accts]) => {
-        setAccounts(accts);
+        setAccounts(accts || []);
         loadTransactions('');
       })
       .catch(() => setError('Failed to load data.'))

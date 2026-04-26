@@ -70,7 +70,7 @@ export default function Portfolio() {
     const url = accountFilter
       ? `${API}/api/portfolio/holdings?account_id=${accountFilter}`
       : `${API}/api/portfolio/holdings`;
-    return fetch(url).then(r => r.json()).then(setHoldings);
+    return fetch(url).then(r => r.json()).then(data => setHoldings(data || []));
   }, [accountFilter]);
 
   const loadTrades = useCallback(() => {

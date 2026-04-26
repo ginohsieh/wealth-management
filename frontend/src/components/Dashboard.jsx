@@ -29,7 +29,7 @@ export default function Dashboard() {
       fetch(`${API}/api/accounts`).then(r => r.json()),
     ];
     Promise.all(all)
-      .then(([s, t, a]) => { setSummary(s); setTransactions(t); setAccounts(a); })
+      .then(([s, t, a]) => { setSummary(s); setTransactions(t || []); setAccounts(a || []); })
       .catch(() => setError('Failed to load dashboard data. Is the backend running?'))
       .finally(() => setLoading(false));
   }, []);
