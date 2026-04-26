@@ -5,7 +5,7 @@ const API = import.meta.env.VITE_API_URL || '';
 const fmt = (n) =>
   new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n);
 
-const EMPTY_FORM = { name: '', type: 'checking', balance: '', currency: 'USD' };
+const EMPTY_FORM = { name: '', type: 'bank', balance: '', currency: 'TWD' };
 
 export default function Accounts() {
   const [accounts, setAccounts] = useState([]);
@@ -129,14 +129,13 @@ export default function Accounts() {
                   value={form.type}
                   onChange={e => setForm(f => ({ ...f, type: e.target.value }))}
                 >
-                  <option value="checking">Checking</option>
-                  <option value="savings">Savings</option>
-                  <option value="investment">Investment</option>
-                  <option value="credit">Credit Card</option>
+                  <option value="bank">🏦 Bank（銀行）</option>
+                  <option value="brokerage">📈 Brokerage（證券）</option>
+                  <option value="credit">💳 Credit（信用）</option>
                 </select>
               </div>
               <div className="form-group">
-                <label>Balance (USD)</label>
+                <label>Balance (TWD)</label>
                 <input
                   type="number"
                   step="0.01"
@@ -152,11 +151,11 @@ export default function Accounts() {
                   value={form.currency}
                   onChange={e => setForm(f => ({ ...f, currency: e.target.value }))}
                 >
+                  <option value="TWD">TWD</option>
                   <option value="USD">USD</option>
                   <option value="EUR">EUR</option>
                   <option value="GBP">GBP</option>
                   <option value="JPY">JPY</option>
-                  <option value="TWD">TWD</option>
                 </select>
               </div>
               <div className="form-actions">

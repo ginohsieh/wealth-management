@@ -26,8 +26,9 @@ Category    string  `json:"category"`
 Type        string  `json:"type"` // income, expense
 }
 
-// Asset represents an investment holding (legacy flat model, kept for snapshot compatibility)
-type Asset struct {
+// PortfolioPosition represents an investment holding in the legacy flat model.
+// The underlying table was renamed from "assets" to "portfolio_positions".
+type PortfolioPosition struct {
 ID            string  `json:"id"`
 Symbol        string  `json:"symbol"`
 Name          string  `json:"name"`
@@ -37,6 +38,26 @@ CurrentPrice  float64 `json:"current_price"`
 Value         float64 `json:"value"`
 GainLoss      float64 `json:"gain_loss"`
 GainLossPct   float64 `json:"gain_loss_pct"`
+}
+
+// Asset is a named sub-account that sits between an Account and its Transactions.
+// type: "cash" | "stock" | "credit_line"
+type Asset struct {
+ID        string `json:"id"`
+AccountID string `json:"account_id"`
+Type      string `json:"type"`
+Name      string `json:"name"`
+Symbol    string `json:"symbol,omitempty"`
+Currency  string `json:"currency"`
+}
+
+// AssetDailyValue records the net value of an asset on a specific date.
+type AssetDailyValue struct {
+ID       string  `json:"id"`
+AssetID  string  `json:"asset_id"`
+Date     string  `json:"date"`
+Value    float64 `json:"value"`
+Currency string  `json:"currency"`
 }
 
 // PortfolioTrade records a single buy or sell event for a security.
@@ -266,13 +287,98 @@ t.ID = fmt.Sprintf("%d", id)
 return t, nil
 }
 
-// ── Assets (legacy flat portfolio) ───────────────────────────────────────────
+// ── PortfolioPositions (legacy flat portfolio) ────────────────────────────────
 
-// GetAssets returns all portfolio assets.
-func GetAssets() ([]Asset, error) {
+// GetPortfolioPositions returns all legacy portfolio positions.
+func GetPortfolioPositions() ([]PortfolioPosition, error) {
 rows, err := db.Query(
 `SELECT id, symbol, name, quantity, purchase_price, current_price
- FROM assets ORDER BY id`)
+ FROM portfolio_positions ORDER BY id`)
+if err != nil {
+return nil, err
+}
+defer rows.Close()
+
+result := []PortfolioPosition{}
+for rows.Next() {
+var a PortfolioPosition
+var id int
+if err := rows.Scan(&id, &a.Symbol, &a.Name, &a.Quantity,
+&a.PurchasePrice, &a.CurrentPrice); err != nil {
+return nil, err
+}
+a.ID = fmt.Sprintf("%d", id)
+a = calculatePositionFields(a)
+result = append(result, a)
+}
+return result, rows.Err()
+}
+
+// CreatePortfolioPosition inserts a new position and returns it with computed fields.
+func CreatePortfolioPosition(a PortfolioPosition) (PortfolioPosition, error) {
+a = calculatePositionFields(a)
+var id int
+err := db.QueryRow(
+`INSERT INTO portfolio_positions(symbol, name, quantity, purchase_price, current_price)
+ VALUES($1,$2,$3,$4,$5) RETURNING id`,
+a.Symbol, a.Name, a.Quantity, a.PurchasePrice, a.CurrentPrice,
+).Scan(&id)
+if err != nil {
+return PortfolioPosition{}, err
+}
+a.ID = fmt.Sprintf("%d", id)
+return a, nil
+}
+
+// UpdatePortfolioPosition replaces an existing position.
+func UpdatePortfolioPosition(id string, a PortfolioPosition) (PortfolioPosition, bool, error) {
+a = calculatePositionFields(a)
+var dbID int
+err := db.QueryRow(
+`UPDATE portfolio_positions SET symbol=$2, name=$3, quantity=$4, purchase_price=$5, current_price=$6
+ WHERE id=$1 RETURNING id`,
+id, a.Symbol, a.Name, a.Quantity, a.PurchasePrice, a.CurrentPrice,
+).Scan(&dbID)
+if err == sql.ErrNoRows {
+return PortfolioPosition{}, false, nil
+}
+if err != nil {
+return PortfolioPosition{}, false, err
+}
+a.ID = fmt.Sprintf("%d", dbID)
+return a, true, nil
+}
+
+// DeletePortfolioPosition removes a position by ID.
+func DeletePortfolioPosition(id string) (bool, error) {
+res, err := db.Exec(`DELETE FROM portfolio_positions WHERE id=$1`, id)
+if err != nil {
+return false, err
+}
+n, _ := res.RowsAffected()
+return n > 0, nil
+}
+
+func calculatePositionFields(a PortfolioPosition) PortfolioPosition {
+a.Value = a.Quantity * a.CurrentPrice
+a.GainLoss = a.Value - (a.Quantity * a.PurchasePrice)
+if a.PurchasePrice > 0 {
+a.GainLossPct = (a.CurrentPrice - a.PurchasePrice) / a.PurchasePrice * 100
+}
+return a
+}
+
+// ── Assets (account → transaction bridge) ────────────────────────────────────
+
+// GetAssets returns all assets, optionally filtered by account_id.
+func GetAssets(accountID string) ([]Asset, error) {
+var rows *sql.Rows
+var err error
+if accountID == "" {
+rows, err = db.Query(`SELECT id, account_id, type, name, COALESCE(symbol,''), currency FROM assets ORDER BY id`)
+} else {
+rows, err = db.Query(`SELECT id, account_id, type, name, COALESCE(symbol,''), currency FROM assets WHERE account_id=$1 ORDER BY id`, accountID)
+}
 if err != nil {
 return nil, err
 }
@@ -281,26 +387,48 @@ defer rows.Close()
 result := []Asset{}
 for rows.Next() {
 var a Asset
-var id int
-if err := rows.Scan(&id, &a.Symbol, &a.Name, &a.Quantity,
-&a.PurchasePrice, &a.CurrentPrice); err != nil {
+var id, accountIDInt int
+if err := rows.Scan(&id, &accountIDInt, &a.Type, &a.Name, &a.Symbol, &a.Currency); err != nil {
 return nil, err
 }
 a.ID = fmt.Sprintf("%d", id)
-a = calculateAssetFields(a)
+a.AccountID = fmt.Sprintf("%d", accountIDInt)
 result = append(result, a)
 }
 return result, rows.Err()
 }
 
-// CreateAsset inserts a new asset and returns it with computed fields.
+// GetAssetByID returns a single asset by ID.
+func GetAssetByID(id string) (Asset, bool, error) {
+var a Asset
+var dbID, accountIDInt int
+err := db.QueryRow(
+`SELECT id, account_id, type, name, COALESCE(symbol,''), currency FROM assets WHERE id=$1`, id,
+).Scan(&dbID, &accountIDInt, &a.Type, &a.Name, &a.Symbol, &a.Currency)
+if err == sql.ErrNoRows {
+return Asset{}, false, nil
+}
+if err != nil {
+return Asset{}, false, err
+}
+a.ID = fmt.Sprintf("%d", dbID)
+a.AccountID = fmt.Sprintf("%d", accountIDInt)
+return a, true, nil
+}
+
+// CreateAsset inserts a new asset and returns it with a generated ID.
 func CreateAsset(a Asset) (Asset, error) {
-a = calculateAssetFields(a)
+if a.Currency == "" {
+a.Currency = "TWD"
+}
+var symbol interface{}
+if a.Symbol != "" {
+symbol = a.Symbol
+}
 var id int
 err := db.QueryRow(
-`INSERT INTO assets(symbol, name, quantity, purchase_price, current_price)
- VALUES($1,$2,$3,$4,$5) RETURNING id`,
-a.Symbol, a.Name, a.Quantity, a.PurchasePrice, a.CurrentPrice,
+`INSERT INTO assets(account_id, type, name, symbol, currency) VALUES($1,$2,$3,$4,$5) RETURNING id`,
+a.AccountID, a.Type, a.Name, symbol, a.Currency,
 ).Scan(&id)
 if err != nil {
 return Asset{}, err
@@ -311,12 +439,17 @@ return a, nil
 
 // UpdateAsset replaces an existing asset.
 func UpdateAsset(id string, a Asset) (Asset, bool, error) {
-a = calculateAssetFields(a)
+if a.Currency == "" {
+a.Currency = "TWD"
+}
+var symbol interface{}
+if a.Symbol != "" {
+symbol = a.Symbol
+}
 var dbID int
 err := db.QueryRow(
-`UPDATE assets SET symbol=$2, name=$3, quantity=$4, purchase_price=$5, current_price=$6
- WHERE id=$1 RETURNING id`,
-id, a.Symbol, a.Name, a.Quantity, a.PurchasePrice, a.CurrentPrice,
+`UPDATE assets SET account_id=$2, type=$3, name=$4, symbol=$5, currency=$6 WHERE id=$1 RETURNING id`,
+id, a.AccountID, a.Type, a.Name, symbol, a.Currency,
 ).Scan(&dbID)
 if err == sql.ErrNoRows {
 return Asset{}, false, nil
@@ -338,13 +471,49 @@ n, _ := res.RowsAffected()
 return n > 0, nil
 }
 
-func calculateAssetFields(a Asset) Asset {
-a.Value = a.Quantity * a.CurrentPrice
-a.GainLoss = a.Value - (a.Quantity * a.PurchasePrice)
-if a.PurchasePrice > 0 {
-a.GainLossPct = (a.CurrentPrice - a.PurchasePrice) / a.PurchasePrice * 100
+// ── Asset Daily Values ────────────────────────────────────────────────────────
+
+// GetAssetDailyValues returns daily value snapshots for an asset.
+func GetAssetDailyValues(assetID string) ([]AssetDailyValue, error) {
+rows, err := db.Query(
+`SELECT id, asset_id, date::TEXT, value, currency FROM asset_daily_values WHERE asset_id=$1 ORDER BY date`, assetID)
+if err != nil {
+return nil, err
 }
-return a
+defer rows.Close()
+
+result := []AssetDailyValue{}
+for rows.Next() {
+var v AssetDailyValue
+var id, assetIDInt int
+if err := rows.Scan(&id, &assetIDInt, &v.Date, &v.Value, &v.Currency); err != nil {
+return nil, err
+}
+v.ID = fmt.Sprintf("%d", id)
+v.AssetID = fmt.Sprintf("%d", assetIDInt)
+result = append(result, v)
+}
+return result, rows.Err()
+}
+
+// UpsertAssetDailyValue inserts or replaces a daily value snapshot for an asset.
+func UpsertAssetDailyValue(v AssetDailyValue) (AssetDailyValue, error) {
+if v.Currency == "" {
+v.Currency = "TWD"
+}
+var id int
+err := db.QueryRow(
+`INSERT INTO asset_daily_values(asset_id, date, value, currency)
+ VALUES($1,$2,$3,$4)
+ ON CONFLICT(asset_id, date) DO UPDATE SET value=$3, currency=$4
+ RETURNING id`,
+v.AssetID, v.Date, v.Value, v.Currency,
+).Scan(&id)
+if err != nil {
+return AssetDailyValue{}, err
+}
+v.ID = fmt.Sprintf("%d", id)
+return v, nil
 }
 
 // ── CalcFeeAndTax (pure, no DB) ───────────────────────────────────────────────
@@ -680,7 +849,7 @@ portfolioValue += h.Value
 }
 } else {
 if err := db.QueryRow(
-`SELECT COALESCE(SUM(quantity * current_price), 0) FROM assets`,
+`SELECT COALESCE(SUM(quantity * current_price), 0) FROM portfolio_positions`,
 ).Scan(&portfolioValue); err != nil {
 return Summary{}, err
 }
@@ -786,7 +955,7 @@ portfolioValue += h.Value
 }
 } else {
 if err := db.QueryRow(
-`SELECT COALESCE(SUM(quantity * current_price), 0) FROM assets`,
+`SELECT COALESCE(SUM(quantity * current_price), 0) FROM portfolio_positions`,
 ).Scan(&portfolioValue); err != nil {
 return NetWorthSnapshot{}, err
 }

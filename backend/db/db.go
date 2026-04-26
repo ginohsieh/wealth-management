@@ -81,7 +81,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     name     TEXT          NOT NULL,
     type     TEXT          NOT NULL,
     balance  NUMERIC(18,4) NOT NULL DEFAULT 0,
-    currency TEXT          NOT NULL DEFAULT 'USD'
+    currency TEXT          NOT NULL DEFAULT 'TWD'
 );
 
 CREATE TABLE IF NOT EXISTS transactions (
@@ -94,7 +94,44 @@ CREATE TABLE IF NOT EXISTS transactions (
     type        TEXT          NOT NULL
 );
 
+-- Rename legacy flat-model assets table if it still has old schema columns.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'assets' AND column_name = 'purchase_price'
+    ) THEN
+        ALTER TABLE assets RENAME TO portfolio_positions;
+    END IF;
+END $$;
+
+-- New assets table: bridge between accounts and transactions.
+-- type: 'cash' | 'stock' | 'credit_line'
 CREATE TABLE IF NOT EXISTS assets (
+    id         SERIAL  PRIMARY KEY,
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    type       TEXT    NOT NULL,
+    name       TEXT    NOT NULL,
+    symbol     TEXT,
+    currency   TEXT    NOT NULL DEFAULT 'TWD'
+);
+
+-- Per-asset daily net-value snapshot.
+CREATE TABLE IF NOT EXISTS asset_daily_values (
+    id       SERIAL        PRIMARY KEY,
+    asset_id INTEGER       NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+    date     DATE          NOT NULL,
+    value    NUMERIC(18,4) NOT NULL,
+    currency TEXT          NOT NULL DEFAULT 'TWD',
+    UNIQUE (asset_id, date)
+);
+
+-- Add asset_id link to transactions (nullable for backward compatibility).
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS asset_id INTEGER REFERENCES assets(id) ON DELETE SET NULL;
+
+-- Legacy portfolio_positions table (renamed from old assets).
+-- Created only when the DO $$ block above could not rename (fresh DB).
+CREATE TABLE IF NOT EXISTS portfolio_positions (
     id             SERIAL        PRIMARY KEY,
     symbol         TEXT          NOT NULL,
     name           TEXT          NOT NULL,

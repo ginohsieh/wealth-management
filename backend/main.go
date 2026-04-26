@@ -88,6 +88,15 @@ func main() {
 		api.DELETE("/account-groups/:id", handlers.DeleteAccountGroup)
 		api.PUT("/account-groups/:id/members", handlers.SetGroupMembers)
 		api.GET("/account-groups/:id/stats", handlers.GetGroupStats)
+
+		// Assets (account → transaction bridge)
+		api.GET("/assets", handlers.GetAssets)
+		api.POST("/assets", handlers.CreateAccountAsset)
+		api.GET("/assets/:id", handlers.GetAsset)
+		api.PUT("/assets/:id", handlers.UpdateAccountAsset)
+		api.DELETE("/assets/:id", handlers.DeleteAccountAsset)
+		api.GET("/assets/:id/daily-values", handlers.GetAssetDailyValues)
+		api.POST("/assets/:id/daily-values", handlers.UpsertAssetDailyValue)
 	}
 
 	r.Run(":8080")
