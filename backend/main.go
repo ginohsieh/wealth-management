@@ -77,6 +77,14 @@ func main() {
 
 		api.GET("/snapshots", handlers.GetSnapshots)
 		api.POST("/snapshots", handlers.RecordSnapshot)
+
+		api.GET("/account-groups", handlers.GetAccountGroups)
+		api.POST("/account-groups", handlers.CreateAccountGroup)
+		api.GET("/account-groups/:id", handlers.GetAccountGroup)
+		api.PUT("/account-groups/:id", handlers.UpdateAccountGroup)
+		api.DELETE("/account-groups/:id", handlers.DeleteAccountGroup)
+		api.PUT("/account-groups/:id/members", handlers.SetGroupMembers)
+		api.GET("/account-groups/:id/stats", handlers.GetGroupStats)
 	}
 
 	r.Run(":8080")

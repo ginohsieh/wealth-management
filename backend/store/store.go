@@ -42,17 +42,18 @@ GainLossPct   float64 `json:"gain_loss_pct"`
 // PortfolioTrade records a single buy or sell event for a security.
 // Fee and Tax are auto-calculated from market rules when not explicitly provided.
 type PortfolioTrade struct {
-ID       string  `json:"id"`
-Symbol   string  `json:"symbol"`
-Name     string  `json:"name"`
-Type     string  `json:"type"`   // "buy" or "sell"
-Date     string  `json:"date"`
-Quantity float64 `json:"quantity"`
-Price    float64 `json:"price"`
-Market   string  `json:"market"` // "US", "TW", "HK", "OTHER"
-Fee      float64 `json:"fee"`
-Tax      float64 `json:"tax"`
-Notes    string  `json:"notes"`
+ID        string  `json:"id"`
+Symbol    string  `json:"symbol"`
+Name      string  `json:"name"`
+Type      string  `json:"type"`   // "buy" or "sell"
+Date      string  `json:"date"`
+Quantity  float64 `json:"quantity"`
+Price     float64 `json:"price"`
+Market    string  `json:"market"` // "US", "TW", "HK", "OTHER"
+Fee       float64 `json:"fee"`
+Tax       float64 `json:"tax"`
+Notes     string  `json:"notes"`
+AccountID string  `json:"account_id"`
 }
 
 // Holding is a derived, aggregated position computed from all trades for a symbol.
@@ -100,6 +101,25 @@ PortfolioValue   float64 `json:"portfolio_value"`
 TotalAssets      float64 `json:"total_assets"`
 TotalLiabilities float64 `json:"total_liabilities"`
 NetWorth         float64 `json:"net_worth"`
+}
+
+// AccountGroup is a named collection of accounts for aggregate reporting.
+type AccountGroup struct {
+ID          string   `json:"id"`
+Name        string   `json:"name"`
+Description string   `json:"description"`
+AccountIDs  []string `json:"account_ids"`
+}
+
+// GroupStats aggregates balance and portfolio metrics for an account group.
+type GroupStats struct {
+GroupID        string  `json:"group_id"`
+GroupName      string  `json:"group_name"`
+TotalBalance   float64 `json:"total_balance"`
+PortfolioValue float64 `json:"portfolio_value"`
+TotalCost      float64 `json:"total_cost"`
+UnrealizedGain float64 `json:"unrealized_gain"`
+ROR            float64 `json:"ror"`
 }
 
 // db is the package-level database connection set by Init.
@@ -359,11 +379,19 @@ return
 
 // ── Portfolio Trades ──────────────────────────────────────────────────────────
 
-// GetTrades returns all portfolio trades.
-func GetTrades() ([]PortfolioTrade, error) {
-rows, err := db.Query(
-`SELECT id, symbol, name, type, date, quantity, price, market, fee, tax, notes
+// GetTrades returns all portfolio trades, optionally filtered by account ID.
+func GetTrades(accountID string) ([]PortfolioTrade, error) {
+var rows *sql.Rows
+var err error
+if accountID == "" {
+rows, err = db.Query(
+`SELECT id, symbol, name, type, date, quantity, price, market, fee, tax, notes, account_id
  FROM portfolio_trades ORDER BY id`)
+} else {
+rows, err = db.Query(
+`SELECT id, symbol, name, type, date, quantity, price, market, fee, tax, notes, account_id
+ FROM portfolio_trades WHERE account_id = $1 ORDER BY id`, accountID)
+}
 if err != nil {
 return nil, err
 }
@@ -373,11 +401,15 @@ var result []PortfolioTrade
 for rows.Next() {
 var t PortfolioTrade
 var id int
+var accountIDNull sql.NullInt64
 if err := rows.Scan(&id, &t.Symbol, &t.Name, &t.Type, &t.Date,
-&t.Quantity, &t.Price, &t.Market, &t.Fee, &t.Tax, &t.Notes); err != nil {
+&t.Quantity, &t.Price, &t.Market, &t.Fee, &t.Tax, &t.Notes, &accountIDNull); err != nil {
 return nil, err
 }
 t.ID = fmt.Sprintf("%d", id)
+if accountIDNull.Valid {
+t.AccountID = fmt.Sprintf("%d", accountIDNull.Int64)
+}
 result = append(result, t)
 }
 return result, rows.Err()
@@ -395,12 +427,19 @@ if t.Tax == 0 {
 t.Tax = autoTax
 }
 
+var accountID interface{}
+if t.AccountID != "" {
+accountID = t.AccountID
+} else {
+accountID = nil
+}
+
 var id int
 err := db.QueryRow(
-`INSERT INTO portfolio_trades(symbol, name, type, date, quantity, price, market, fee, tax, notes)
- VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
+`INSERT INTO portfolio_trades(symbol, name, type, date, quantity, price, market, fee, tax, notes, account_id)
+ VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
 t.Symbol, t.Name, t.Type, t.Date, t.Quantity, t.Price,
-t.Market, t.Fee, t.Tax, t.Notes,
+t.Market, t.Fee, t.Tax, t.Notes, accountID,
 ).Scan(&id)
 if err != nil {
 return PortfolioTrade{}, err
@@ -457,12 +496,18 @@ syms = append(syms, s)
 return syms, rows.Err()
 }
 
-// computeHoldings loads all trades and symbol prices from the DB and aggregates
-// them into per-symbol holdings in Go. Returns (nil, err) on DB failure.
-func computeHoldings() ([]Holding, error) {
-// Load all trades
-rows, err := db.Query(
+// computeHoldings loads trades and symbol prices from the DB and aggregates
+// them into per-symbol holdings. Optionally filtered by accountID.
+func computeHoldings(accountID string) ([]Holding, error) {
+var rows *sql.Rows
+var err error
+if accountID == "" {
+rows, err = db.Query(
 `SELECT symbol, name, type, quantity, price, fee FROM portfolio_trades ORDER BY id`)
+} else {
+rows, err = db.Query(
+`SELECT symbol, name, type, quantity, price, fee FROM portfolio_trades WHERE account_id = $1 ORDER BY id`, accountID)
+}
 if err != nil {
 return nil, err
 }
@@ -563,9 +608,9 @@ LastUpdated:  lastUpdated,
 return holdings, nil
 }
 
-// GetHoldings returns aggregated per-symbol holdings derived from all trades.
-func GetHoldings() ([]Holding, error) {
-return computeHoldings()
+// GetHoldings returns aggregated per-symbol holdings, optionally filtered by account.
+func GetHoldings(accountID string) ([]Holding, error) {
+return computeHoldings(accountID)
 }
 
 // ── Summary ───────────────────────────────────────────────────────────────────
@@ -601,7 +646,7 @@ if err := db.QueryRow(`SELECT COUNT(*) FROM portfolio_trades`).Scan(&tradeCount)
 return Summary{}, err
 }
 if tradeCount > 0 {
-holdings, err := computeHoldings()
+holdings, err := computeHoldings("")
 if err != nil {
 return Summary{}, err
 }
@@ -707,7 +752,7 @@ if err := db.QueryRow(`SELECT COUNT(*) FROM portfolio_trades`).Scan(&tradeCount)
 return NetWorthSnapshot{}, err
 }
 if tradeCount > 0 {
-holdings, err := computeHoldings()
+holdings, err := computeHoldings("")
 if err != nil {
 return NetWorthSnapshot{}, err
 }
@@ -772,4 +817,220 @@ ON CONFLICT(id) DO UPDATE
 cfg.Source, cfg.IntervalSeconds, cfg.APIKey, cfg.Enabled,
 )
 return err
+}
+
+// ── Account Groups ────────────────────────────────────────────────────────────
+
+func GetAccountGroups() ([]AccountGroup, error) {
+rows, err := db.Query(`SELECT id, name, description FROM account_groups ORDER BY id`)
+if err != nil {
+return nil, err
+}
+defer rows.Close()
+
+var groups []AccountGroup
+groupIndex := map[string]int{}
+for rows.Next() {
+var g AccountGroup
+var id int
+if err := rows.Scan(&id, &g.Name, &g.Description); err != nil {
+return nil, err
+}
+g.ID = fmt.Sprintf("%d", id)
+g.AccountIDs = []string{}
+groupIndex[g.ID] = len(groups)
+groups = append(groups, g)
+}
+if err := rows.Err(); err != nil {
+return nil, err
+}
+
+mRows, err := db.Query(`SELECT group_id, account_id FROM account_group_members ORDER BY group_id, account_id`)
+if err != nil {
+return nil, err
+}
+defer mRows.Close()
+for mRows.Next() {
+var gid, aid int
+if err := mRows.Scan(&gid, &aid); err != nil {
+return nil, err
+}
+gidStr := fmt.Sprintf("%d", gid)
+if idx, ok := groupIndex[gidStr]; ok {
+groups[idx].AccountIDs = append(groups[idx].AccountIDs, fmt.Sprintf("%d", aid))
+}
+}
+return groups, mRows.Err()
+}
+
+func GetAccountGroupByID(id string) (AccountGroup, bool, error) {
+var g AccountGroup
+var dbID int
+err := db.QueryRow(`SELECT id, name, description FROM account_groups WHERE id = $1`, id).
+Scan(&dbID, &g.Name, &g.Description)
+if err == sql.ErrNoRows {
+return AccountGroup{}, false, nil
+}
+if err != nil {
+return AccountGroup{}, false, err
+}
+g.ID = fmt.Sprintf("%d", dbID)
+g.AccountIDs = []string{}
+
+mRows, err := db.Query(`SELECT account_id FROM account_group_members WHERE group_id = $1 ORDER BY account_id`, id)
+if err != nil {
+return AccountGroup{}, false, err
+}
+defer mRows.Close()
+for mRows.Next() {
+var aid int
+if err := mRows.Scan(&aid); err != nil {
+return AccountGroup{}, false, err
+}
+g.AccountIDs = append(g.AccountIDs, fmt.Sprintf("%d", aid))
+}
+return g, true, mRows.Err()
+}
+
+func CreateAccountGroup(g AccountGroup) (AccountGroup, error) {
+var id int
+err := db.QueryRow(
+`INSERT INTO account_groups(name, description) VALUES($1,$2) RETURNING id`,
+g.Name, g.Description,
+).Scan(&id)
+if err != nil {
+return AccountGroup{}, err
+}
+g.ID = fmt.Sprintf("%d", id)
+if g.AccountIDs == nil {
+g.AccountIDs = []string{}
+}
+return g, nil
+}
+
+func UpdateAccountGroup(id string, g AccountGroup) (AccountGroup, bool, error) {
+var dbID int
+err := db.QueryRow(
+`UPDATE account_groups SET name=$2, description=$3 WHERE id=$1 RETURNING id`,
+id, g.Name, g.Description,
+).Scan(&dbID)
+if err == sql.ErrNoRows {
+return AccountGroup{}, false, nil
+}
+if err != nil {
+return AccountGroup{}, false, err
+}
+g.ID = fmt.Sprintf("%d", dbID)
+updated, _, err := GetAccountGroupByID(g.ID)
+return updated, true, err
+}
+
+func DeleteAccountGroup(id string) (bool, error) {
+res, err := db.Exec(`DELETE FROM account_groups WHERE id=$1`, id)
+if err != nil {
+return false, err
+}
+n, _ := res.RowsAffected()
+return n > 0, nil
+}
+
+func SetGroupMembers(groupID string, accountIDs []string) error {
+tx, err := db.Begin()
+if err != nil {
+return err
+}
+defer tx.Rollback()
+
+if _, err := tx.Exec(`DELETE FROM account_group_members WHERE group_id = $1`, groupID); err != nil {
+return err
+}
+for _, aid := range accountIDs {
+if _, err := tx.Exec(
+`INSERT INTO account_group_members(group_id, account_id) VALUES($1,$2)`,
+groupID, aid,
+); err != nil {
+return err
+}
+}
+return tx.Commit()
+}
+
+func GetGroupStats(groupID string) (GroupStats, bool, error) {
+var g AccountGroup
+var dbID int
+err := db.QueryRow(`SELECT id, name FROM account_groups WHERE id = $1`, groupID).
+Scan(&dbID, &g.Name)
+if err == sql.ErrNoRows {
+return GroupStats{}, false, nil
+}
+if err != nil {
+return GroupStats{}, false, err
+}
+g.ID = fmt.Sprintf("%d", dbID)
+
+mRows, err := db.Query(`SELECT account_id FROM account_group_members WHERE group_id = $1`, groupID)
+if err != nil {
+return GroupStats{}, false, err
+}
+defer mRows.Close()
+var accountIDs []string
+for mRows.Next() {
+var aid int
+if err := mRows.Scan(&aid); err != nil {
+return GroupStats{}, false, err
+}
+accountIDs = append(accountIDs, fmt.Sprintf("%d", aid))
+}
+if err := mRows.Err(); err != nil {
+return GroupStats{}, false, err
+}
+
+var totalBalance float64
+for _, aid := range accountIDs {
+var bal float64
+if err := db.QueryRow(`SELECT COALESCE(balance, 0) FROM accounts WHERE id = $1`, aid).Scan(&bal); err != nil && err != sql.ErrNoRows {
+return GroupStats{}, false, err
+}
+totalBalance += bal
+}
+
+type symHolding struct {
+value     float64
+totalCost float64
+}
+holdingsMap := map[string]symHolding{}
+for _, aid := range accountIDs {
+holdings, err := computeHoldings(aid)
+if err != nil {
+return GroupStats{}, false, err
+}
+for _, h := range holdings {
+existing := holdingsMap[h.Symbol]
+existing.value += h.Value
+existing.totalCost += h.TotalCost
+holdingsMap[h.Symbol] = existing
+}
+}
+
+var portfolioValue, totalCost float64
+for _, sh := range holdingsMap {
+portfolioValue += sh.value
+totalCost += sh.totalCost
+}
+
+unrealizedGain := portfolioValue - totalCost
+var ror float64
+if totalCost > 0 {
+ror = unrealizedGain / totalCost * 100
+}
+
+return GroupStats{
+GroupID:        g.ID,
+GroupName:      g.Name,
+TotalBalance:   totalBalance,
+PortfolioValue: portfolioValue,
+TotalCost:      totalCost,
+UnrealizedGain: unrealizedGain,
+ROR:            ror,
+}, true, nil
 }

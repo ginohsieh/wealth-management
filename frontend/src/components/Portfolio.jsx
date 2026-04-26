@@ -18,7 +18,7 @@ const MARKETS = [
 
 const EMPTY_TRADE = {
   symbol: '', name: '', type: 'buy', date: today(),
-  quantity: '', price: '', market: 'US', fee: '', tax: '', notes: '',
+  quantity: '', price: '', market: 'US', fee: '', tax: '', notes: '', account_id: '',
 };
 
 const DEFAULT_PRICE_CFG = { source: 'yahoo', interval_seconds: 300, api_key: '', enabled: false };
@@ -49,6 +49,8 @@ export default function Portfolio() {
   const [tab, setTab]             = useState('holdings');  // 'holdings' | 'trades' | 'settings'
   const [holdings, setHoldings]   = useState([]);
   const [trades, setTrades]       = useState([]);
+  const [accounts, setAccounts]   = useState([]);
+  const [accountFilter, setAccountFilter] = useState('');
   const [loading, setLoading]     = useState(true);
   const [error, setError]         = useState('');
   const [showModal, setShowModal] = useState(false);
@@ -64,10 +66,23 @@ export default function Portfolio() {
   const [refreshing, setRefreshing]     = useState(false);
   const [refreshResult, setRefreshResult] = useState(null);
 
-  const loadHoldings = useCallback(() =>
-    fetch(`${API}/api/portfolio/holdings`).then(r => r.json()).then(setHoldings), []);
-  const loadTrades = useCallback(() =>
-    fetch(`${API}/api/portfolio/trades`).then(r => r.json()).then(data => setTrades(data || [])), []);
+  const loadHoldings = useCallback(() => {
+    const url = accountFilter
+      ? `${API}/api/portfolio/holdings?account_id=${accountFilter}`
+      : `${API}/api/portfolio/holdings`;
+    return fetch(url).then(r => r.json()).then(setHoldings);
+  }, [accountFilter]);
+
+  const loadTrades = useCallback(() => {
+    const url = accountFilter
+      ? `${API}/api/portfolio/trades?account_id=${accountFilter}`
+      : `${API}/api/portfolio/trades`;
+    return fetch(url).then(r => r.json()).then(data => setTrades(data || []));
+  }, [accountFilter]);
+
+  const loadAccounts = useCallback(() =>
+    fetch(`${API}/api/accounts`).then(r => r.json()).then(data => setAccounts(data || [])), []);
+
   const loadPriceCfg = useCallback(() =>
     fetch(`${API}/api/price-config`)
       .then(r => r.json())
@@ -75,12 +90,18 @@ export default function Portfolio() {
 
   const loadAll = useCallback(() => {
     setLoading(true);
-    Promise.all([loadHoldings(), loadTrades(), loadPriceCfg()])
+    Promise.all([loadHoldings(), loadTrades(), loadPriceCfg(), loadAccounts()])
       .catch(() => setError('Failed to load portfolio.'))
       .finally(() => setLoading(false));
-  }, [loadHoldings, loadTrades, loadPriceCfg]);
+  }, [loadHoldings, loadTrades, loadPriceCfg, loadAccounts]);
 
   useEffect(loadAll, [loadAll]);
+
+  // Reload holdings and trades when account filter changes
+  useEffect(() => {
+    loadHoldings();
+    loadTrades();
+  }, [accountFilter, loadHoldings, loadTrades]);
 
   // Auto-compute fee & tax when market/type/qty/price changes (only if user hasn't overridden)
   const computed = calcFeeAndTax(form.market, form.type, form.quantity, form.price);
@@ -207,6 +228,21 @@ export default function Portfolio() {
           <div className="card-title">Holdings</div>
           <div className="card-value">{holdings.length}</div>
         </div>
+      </div>
+
+      {/* Account filter */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '1rem' }}>
+        <label style={{ fontWeight: 600 }}>Account Filter:</label>
+        <select
+          value={accountFilter}
+          onChange={e => setAccountFilter(e.target.value)}
+          style={{ padding: '0.4rem 0.6rem', borderRadius: '4px', border: '1px solid #cbd5e0' }}
+        >
+          <option value="">All accounts</option>
+          {accounts.map(a => (
+            <option key={a.id} value={a.id}>{a.name}</option>
+          ))}
+        </select>
       </div>
 
       {/* Tab switcher */}
@@ -638,6 +674,19 @@ export default function Portfolio() {
                   onChange={e => handleFormChange('notes', e.target.value)}
                   placeholder="e.g. Q1 rebalance"
                 />
+              </div>
+
+              <div className="form-group">
+                <label>Broker Account (optional)</label>
+                <select
+                  value={form.account_id}
+                  onChange={e => handleFormChange('account_id', e.target.value)}
+                >
+                  <option value="">No account / unlinked</option>
+                  {accounts.map(a => (
+                    <option key={a.id} value={a.id}>{a.name}</option>
+                  ))}
+                </select>
               </div>
 
               <div className="form-actions">

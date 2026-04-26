@@ -4,6 +4,7 @@ import Accounts from './components/Accounts.jsx';
 import Transactions from './components/Transactions.jsx';
 import Portfolio from './components/Portfolio.jsx';
 import NetWorthHistory from './components/NetWorthHistory.jsx';
+import AccountGroups from './components/AccountGroups.jsx';
 
 const TABS = [
   { id: 'dashboard', label: '📊 Dashboard' },
@@ -11,6 +12,7 @@ const TABS = [
   { id: 'transactions', label: '💳 Transactions' },
   { id: 'portfolio', label: '📈 Portfolio' },
   { id: 'history', label: '📅 History' },
+  { id: 'groups', label: '🗂️ Groups' },
 ];
 
 function App() {
@@ -23,6 +25,7 @@ function App() {
       case 'transactions': return <Transactions />;
       case 'portfolio':    return <Portfolio />;
       case 'history':      return <NetWorthHistory />;
+      case 'groups':       return <AccountGroups />;
       default:             return <Dashboard />;
     }
   };

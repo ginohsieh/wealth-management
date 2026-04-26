@@ -8,8 +8,10 @@ import (
 )
 
 // GetTrades returns all portfolio trades, newest date first.
+// Optionally filtered by ?account_id= query param.
 func GetTrades(c *gin.Context) {
-	trades, err := store.GetTrades()
+	accountID := c.Query("account_id")
+	trades, err := store.GetTrades(accountID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 		return
@@ -62,8 +64,10 @@ func DeleteTrade(c *gin.Context) {
 }
 
 // GetHoldings returns aggregated per-symbol positions derived from all trades.
+// Optionally filtered by ?account_id= query param.
 func GetHoldings(c *gin.Context) {
-	holdings, err := store.GetHoldings()
+	accountID := c.Query("account_id")
+	holdings, err := store.GetHoldings(accountID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 		return
