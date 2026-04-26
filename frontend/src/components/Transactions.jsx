@@ -90,6 +90,7 @@ export default function Transactions() {
         setAccounts(accts || []);
         loadTransactions('');
         loadSettlements();
+        loadAllSettlements();
       })
       .catch(() => setError('Failed to load data.'))
       .finally(() => setLoading(false));
@@ -169,6 +170,7 @@ export default function Transactions() {
       setResolvedName('');
       loadTransactions(filterAccount);
       loadSettlements();
+      loadAllSettlements();
     } catch {
       alert('Failed to create transaction.');
     } finally {
@@ -186,10 +188,26 @@ export default function Transactions() {
       const res = await fetch(`${API}/api/settlements/${id}/settle`, { method: 'POST' });
       if (!res.ok) throw new Error();
       loadSettlements();
+      loadAllSettlements();
     } catch {
       alert('Failed to settle transaction.');
     }
   };
+
+  const [expandedTx, setExpandedTx] = useState(null); // transaction id that is expanded
+
+  // Build a lookup: transaction_id (string) → settlement record (all statuses)
+  const [allSettlements, setAllSettlements] = useState([]);
+
+  const loadAllSettlements = () => {
+    fetch(`${API}/api/settlements`)
+      .then(r => r.json())
+      .then(data => setAllSettlements(data || []))
+      .catch(() => {});
+  };
+
+  const settlementForTx = (txId) =>
+    allSettlements.find(s => s.transaction_id === txId);
 
   const sorted = [...transactions].sort((a, b) => new Date(b.date) - new Date(a.date));
 
@@ -275,6 +293,7 @@ export default function Transactions() {
           <table>
             <thead>
               <tr>
+                <th style={{ width: '1.5rem' }}></th>
                 <th>Date</th>
                 <th>Description</th>
                 <th>Account</th>
@@ -285,30 +304,93 @@ export default function Transactions() {
               </tr>
             </thead>
             <tbody>
-              {sorted.map(t => (
-                <tr key={t.id}>
-                  <td>{t.date}</td>
-                  <td>{t.description}</td>
-                  <td>{accountName(t.account_id)}</td>
-                  <td>{t.category}</td>
-                  <td>
-                    {t.subtype
-                      ? <span className={`badge ${t.subtype === 'stock_buy' ? 'badge-income' : 'badge-expense'}`}>
-                          {t.subtype === 'stock_buy' ? 'BUY' : 'SELL'}
-                        </span>
-                      : <span className={`badge badge-${t.type}`}>{t.type}</span>
-                    }
-                  </td>
-                  <td>
-                    {t.symbol
-                      ? <span className="badge badge-checking">{t.symbol}</span>
-                      : <span style={{ color: '#a0aec0' }}>—</span>}
-                  </td>
-                  <td className={t.amount >= 0 ? 'amount-positive' : 'amount-negative'}>
-                    {fmt(t.amount)}
-                  </td>
-                </tr>
-              ))}
+              {sorted.map(t => {
+                const isStock = t.subtype === 'stock_buy' || t.subtype === 'stock_sell';
+                const expanded = expandedTx === t.id;
+                const settlement = isStock ? settlementForTx(t.id) : null;
+                return (
+                  <React.Fragment key={t.id}>
+                    <tr
+                      style={{ cursor: isStock ? 'pointer' : 'default', background: expanded ? '#f7fafc' : '' }}
+                      onClick={() => isStock && setExpandedTx(expanded ? null : t.id)}
+                    >
+                      <td style={{ textAlign: 'center', color: '#718096', fontSize: '0.75rem' }}>
+                        {isStock ? (expanded ? '▼' : '▶') : ''}
+                      </td>
+                      <td>{t.date}</td>
+                      <td>{t.description}</td>
+                      <td>{accountName(t.account_id)}</td>
+                      <td>{t.category}</td>
+                      <td>
+                        {t.subtype
+                          ? <span className={`badge ${t.subtype === 'stock_buy' ? 'badge-income' : 'badge-expense'}`}>
+                              {t.subtype === 'stock_buy' ? 'BUY' : 'SELL'}
+                            </span>
+                          : <span className={`badge badge-${t.type}`}>{t.type}</span>
+                        }
+                      </td>
+                      <td>
+                        {t.symbol
+                          ? <span className="badge badge-checking">{t.symbol}</span>
+                          : <span style={{ color: '#a0aec0' }}>—</span>}
+                      </td>
+                      <td className={t.amount >= 0 ? 'amount-positive' : 'amount-negative'}>
+                        {fmt(t.amount)}
+                      </td>
+                    </tr>
+                    {expanded && (
+                      <tr style={{ background: '#f7fafc' }}>
+                        <td></td>
+                        <td colSpan={7} style={{ paddingTop: 0, paddingBottom: '0.75rem' }}>
+                          {settlement ? (
+                            <div style={{
+                              border: `1px solid ${settlement.status === 'settled' ? '#9ae6b4' : '#fbd38d'}`,
+                              borderRadius: '6px',
+                              padding: '0.6rem 1rem',
+                              fontSize: '0.84rem',
+                              background: settlement.status === 'settled' ? '#f0fff4' : '#fffbeb',
+                              display: 'flex',
+                              gap: '1.5rem',
+                              flexWrap: 'wrap',
+                              alignItems: 'center',
+                            }}>
+                              <span>
+                                <strong>Settlement</strong>&nbsp;
+                                <span className={`badge ${settlement.status === 'settled' ? 'badge-income' : 'badge-expense'}`}>
+                                  {settlement.status}
+                                </span>
+                              </span>
+                              <span>Trade: <strong>{settlement.trade_date}</strong></span>
+                              <span>Settles: <strong>{settlement.settlement_date}</strong></span>
+                              <span>Market: <strong>{settlement.market}</strong></span>
+                              <span>
+                                Cash {settlement.trade_type === 'buy' ? 'debit' : 'credit'}:&nbsp;
+                                <strong className={settlement.trade_type === 'buy' ? 'amount-negative' : 'amount-positive'}>
+                                  {settlement.trade_type === 'buy' ? '-' : '+'}{fmt(settlement.amount)}
+                                </strong>
+                              </span>
+                              <span>
+                                Bank: <strong>{settlement.bank_account_id ? accountName(settlement.bank_account_id) : '—'}</strong>
+                              </span>
+                              {settlement.status === 'pending' && (
+                                <button
+                                  className="btn btn-secondary"
+                                  style={{ fontSize: '0.78rem', padding: '0.2rem 0.6rem' }}
+                                  onClick={(e) => { e.stopPropagation(); handleSettle(settlement.id); }}
+                                >
+                                  Settle Now
+                                </button>
+                              )}
+                            </div>
+                          ) : (
+                            <span style={{ color: '#a0aec0', fontSize: '0.84rem' }}>No settlement record found.</span>
+                          )}
+                        </td>
+                      </tr>
+                    )}
+                  </React.Fragment>
+                );
+              })}
             </tbody>
           </table>
         )}
