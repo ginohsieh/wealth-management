@@ -39,6 +39,14 @@ func main() {
 		api.PUT("/portfolio/:id", handlers.UpdateAsset)
 		api.DELETE("/portfolio/:id", handlers.DeleteAsset)
 
+		// Transaction-based portfolio
+		api.GET("/portfolio/trades", handlers.GetTrades)
+		api.POST("/portfolio/trades", handlers.CreateTrade)
+		api.DELETE("/portfolio/trades/:id", handlers.DeleteTrade)
+		api.GET("/portfolio/holdings", handlers.GetHoldings)
+		api.PUT("/portfolio/holdings/:symbol/price", handlers.UpdateSymbolPrice)
+		api.POST("/portfolio/calc-fees", handlers.CalcFeeAndTax)
+
 		api.GET("/snapshots", handlers.GetSnapshots)
 		api.POST("/snapshots", handlers.RecordSnapshot)
 	}

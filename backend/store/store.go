@@ -25,7 +25,7 @@ type Transaction struct {
 	Type        string  `json:"type"` // income, expense
 }
 
-// Asset represents an investment holding
+// Asset represents an investment holding (legacy flat model, kept for snapshot compatibility)
 type Asset struct {
 	ID            string  `json:"id"`
 	Symbol        string  `json:"symbol"`
@@ -36,6 +36,35 @@ type Asset struct {
 	Value         float64 `json:"value"`
 	GainLoss      float64 `json:"gain_loss"`
 	GainLossPct   float64 `json:"gain_loss_pct"`
+}
+
+// PortfolioTrade records a single buy or sell event for a security.
+// Fee and Tax are auto-calculated from market rules when not explicitly provided.
+type PortfolioTrade struct {
+	ID       string  `json:"id"`
+	Symbol   string  `json:"symbol"`
+	Name     string  `json:"name"`
+	Type     string  `json:"type"`     // "buy" or "sell"
+	Date     string  `json:"date"`
+	Quantity float64 `json:"quantity"`
+	Price    float64 `json:"price"`
+	Market   string  `json:"market"` // "US", "TW", "HK", "OTHER"
+	Fee      float64 `json:"fee"`
+	Tax      float64 `json:"tax"`
+	Notes    string  `json:"notes"`
+}
+
+// Holding is a derived, aggregated position computed from all trades for a symbol.
+type Holding struct {
+	Symbol       string  `json:"symbol"`
+	Name         string  `json:"name"`
+	Quantity     float64 `json:"quantity"`      // net shares held
+	AvgCost      float64 `json:"avg_cost"`      // average cost per share (incl. fees)
+	CurrentPrice float64 `json:"current_price"` // latest market price
+	Value        float64 `json:"value"`         // quantity * current_price
+	TotalCost    float64 `json:"total_cost"`    // quantity * avg_cost
+	GainLoss     float64 `json:"gain_loss"`     // value - total_cost
+	GainLossPct  float64 `json:"gain_loss_pct"` // gain_loss / total_cost * 100
 }
 
 // Summary represents an overall financial snapshot
@@ -64,10 +93,13 @@ var (
 	accounts          []Account
 	transactions      []Transaction
 	assets            []Asset
+	trades            []PortfolioTrade
+	symbolPrices      map[string]float64 // current market price per symbol
 	snapshots         []NetWorthSnapshot
 	nextAccountID     = 5
 	nextTransactionID = 9
 	nextAssetID       = 5
+	nextTradeID       = 9
 	nextSnapshotID    = 1
 )
 
@@ -100,6 +132,25 @@ func init() {
 	for i := range assets {
 		assets[i] = calculateAssetFields(assets[i])
 	}
+
+	// Seed portfolio trades (transaction-based portfolio)
+	symbolPrices = map[string]float64{
+		"AAPL":  185.00,
+		"GOOGL": 3100.00,
+		"MSFT":  415.00,
+		"BRK.B": 358.00,
+	}
+	trades = []PortfolioTrade{
+		{ID: "1", Symbol: "AAPL", Name: "Apple Inc.", Type: "buy", Date: "2023-11-15", Quantity: 10, Price: 150.00, Market: "US", Fee: 0, Tax: 0, Notes: "Initial position"},
+		{ID: "2", Symbol: "GOOGL", Name: "Alphabet Inc.", Type: "buy", Date: "2023-12-01", Quantity: 5, Price: 2800.00, Market: "US", Fee: 0, Tax: 0, Notes: ""},
+		{ID: "3", Symbol: "MSFT", Name: "Microsoft Corp.", Type: "buy", Date: "2024-01-10", Quantity: 15, Price: 280.00, Market: "US", Fee: 0, Tax: 0, Notes: ""},
+		{ID: "4", Symbol: "BRK.B", Name: "Berkshire Hathaway", Type: "buy", Date: "2024-02-20", Quantity: 20, Price: 320.00, Market: "US", Fee: 0, Tax: 0, Notes: ""},
+		{ID: "5", Symbol: "AAPL", Name: "Apple Inc.", Type: "buy", Date: "2024-03-05", Quantity: 5, Price: 170.00, Market: "US", Fee: 0, Tax: 0, Notes: "Adding to position"},
+		{ID: "6", Symbol: "MSFT", Name: "Microsoft Corp.", Type: "sell", Date: "2024-04-10", Quantity: 3, Price: 400.00, Market: "US", Fee: 0, Tax: 0, Notes: "Partial sell"},
+		{ID: "7", Symbol: "GOOGL", Name: "Alphabet Inc.", Type: "buy", Date: "2024-04-15", Quantity: 2, Price: 3000.00, Market: "US", Fee: 0, Tax: 0, Notes: ""},
+		{ID: "8", Symbol: "BRK.B", Name: "Berkshire Hathaway", Type: "sell", Date: "2024-04-20", Quantity: 5, Price: 350.00, Market: "US", Fee: 0, Tax: 0, Notes: ""},
+	}
+	nextTradeID = 9
 
 	snapshots = []NetWorthSnapshot{
 		{ID: "1", Date: "2024-04-20", PortfolioValue: 38200.00, TotalAssets: 62000.00, TotalLiabilities: 900.00, NetWorth: 61100.00},
@@ -257,6 +308,162 @@ func DeleteAsset(id string) bool {
 	return false
 }
 
+// CalcFeeAndTax returns the broker fee and transaction tax for a trade
+// based on market rules. Values are in the same currency as the trade.
+//
+// Rules applied:
+//   US  – fee=0 (commission-free brokers), tax=0
+//   TW  – fee=0.1425% of trade value (broker commission, both sides),
+//          tax=0.3% of sell value (securities transaction tax, sell only)
+//   HK  – fee=0.25% of trade value (broker commission, both sides),
+//          stamp duty=0.1% of trade value (both sides)
+//   OTHER/default – fee=0, tax=0
+func CalcFeeAndTax(market, tradeType string, tradeValue float64) (fee, tax float64) {
+	switch market {
+	case "TW":
+		fee = tradeValue * 0.001425
+		if tradeType == "sell" {
+			tax = tradeValue * 0.003
+		}
+	case "HK":
+		fee = tradeValue * 0.0025
+		tax = tradeValue * 0.001
+	default: // "US", "OTHER", etc.
+		fee = 0
+		tax = 0
+	}
+	return
+}
+
+// GetTrades returns all portfolio trades
+func GetTrades() []PortfolioTrade {
+	mu.RLock()
+	defer mu.RUnlock()
+	result := make([]PortfolioTrade, len(trades))
+	copy(result, trades)
+	return result
+}
+
+// CreateTrade records a new buy or sell trade.
+// Fee and Tax are auto-calculated when the caller leaves them as 0.
+func CreateTrade(t PortfolioTrade) PortfolioTrade {
+	mu.Lock()
+	defer mu.Unlock()
+
+	t.ID = fmt.Sprintf("%d", nextTradeID)
+	nextTradeID++
+
+	tradeValue := t.Quantity * t.Price
+	autoFee, autoTax := CalcFeeAndTax(t.Market, t.Type, tradeValue)
+	if t.Fee == 0 {
+		t.Fee = autoFee
+	}
+	if t.Tax == 0 {
+		t.Tax = autoTax
+	}
+
+	trades = append(trades, t)
+
+	// Initialise current price for new symbols
+	if _, exists := symbolPrices[t.Symbol]; !exists {
+		symbolPrices[t.Symbol] = t.Price
+	}
+
+	return t
+}
+
+// DeleteTrade removes a trade by ID
+func DeleteTrade(id string) bool {
+	mu.Lock()
+	defer mu.Unlock()
+	for i, t := range trades {
+		if t.ID == id {
+			trades = append(trades[:i], trades[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+// SetSymbolPrice updates the current market price for a symbol
+func SetSymbolPrice(symbol string, price float64) {
+	mu.Lock()
+	defer mu.Unlock()
+	symbolPrices[symbol] = price
+}
+
+// computeHoldings aggregates all trades into per-symbol holdings.
+// Must be called with mu held (at least RLock).
+func computeHoldings() []Holding {
+	type accumulator struct {
+		name         string
+		buyQty       float64
+		buyTotalCost float64 // sum of (qty*price + fee) for all buys
+		sellQty      float64
+	}
+	// Preserve insertion order for stable output
+	order := []string{}
+	acc := map[string]*accumulator{}
+
+	for _, t := range trades {
+		if _, exists := acc[t.Symbol]; !exists {
+			acc[t.Symbol] = &accumulator{name: t.Name}
+			order = append(order, t.Symbol)
+		}
+		a := acc[t.Symbol]
+		switch t.Type {
+		case "buy":
+			a.buyQty += t.Quantity
+			a.buyTotalCost += t.Quantity*t.Price + t.Fee
+		case "sell":
+			a.sellQty += t.Quantity
+		}
+	}
+
+	var holdings []Holding
+	for _, sym := range order {
+		a := acc[sym]
+		netQty := a.buyQty - a.sellQty
+		if netQty <= 0 {
+			continue
+		}
+
+		var avgCost float64
+		if a.buyQty > 0 {
+			avgCost = a.buyTotalCost / a.buyQty
+		}
+
+		currentPrice := symbolPrices[sym]
+		value := netQty * currentPrice
+		totalCost := netQty * avgCost
+		gainLoss := value - totalCost
+		var gainLossPct float64
+		if totalCost > 0 {
+			gainLossPct = gainLoss / totalCost * 100
+		}
+
+		holdings = append(holdings, Holding{
+			Symbol:       sym,
+			Name:         a.name,
+			Quantity:     netQty,
+			AvgCost:      avgCost,
+			CurrentPrice: currentPrice,
+			Value:        value,
+			TotalCost:    totalCost,
+			GainLoss:     gainLoss,
+			GainLossPct:  gainLossPct,
+		})
+	}
+	return holdings
+}
+
+// GetHoldings returns aggregated per-symbol holdings derived from all trades
+func GetHoldings() []Holding {
+	mu.RLock()
+	defer mu.RUnlock()
+	return computeHoldings()
+}
+
 // GetSummary returns aggregate financial metrics
 func GetSummary() Summary {
 	mu.RLock()
@@ -271,9 +478,16 @@ func GetSummary() Summary {
 		}
 	}
 
+	// Prefer trade-based holdings for portfolio value; fall back to flat assets.
 	var portfolioValue float64
-	for _, a := range assets {
-		portfolioValue += a.Value
+	if len(trades) > 0 {
+		for _, h := range computeHoldings() {
+			portfolioValue += h.Value
+		}
+	} else {
+		for _, a := range assets {
+			portfolioValue += a.Value
+		}
 	}
 
 	var monthlyIncome, monthlyExpenses float64
@@ -322,8 +536,14 @@ func RecordSnapshot(date string) NetWorthSnapshot {
 	}
 
 	var portfolioValue float64
-	for _, a := range assets {
-		portfolioValue += a.Value
+	if len(trades) > 0 {
+		for _, h := range computeHoldings() {
+			portfolioValue += h.Value
+		}
+	} else {
+		for _, a := range assets {
+			portfolioValue += a.Value
+		}
 	}
 
 	snap := NetWorthSnapshot{
