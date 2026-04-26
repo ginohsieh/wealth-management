@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 
 const API = import.meta.env.VITE_API_URL || '';
 
@@ -21,6 +21,8 @@ const EMPTY_TRADE = {
   quantity: '', price: '', market: 'US', fee: '', tax: '', notes: '',
 };
 
+const DEFAULT_PRICE_CFG = { source: 'yahoo', interval_seconds: 300, api_key: '', enabled: false };
+
 function calcFeeAndTax(market, type, quantity, price) {
   const value = (parseFloat(quantity) || 0) * (parseFloat(price) || 0);
   if (value <= 0) return { fee: 0, tax: 0 };
@@ -34,8 +36,17 @@ function calcFeeAndTax(market, type, quantity, price) {
   }
 }
 
+function fmtLastUpdated(iso) {
+  if (!iso) return '—';
+  try {
+    return new Date(iso).toLocaleString();
+  } catch {
+    return iso;
+  }
+}
+
 export default function Portfolio() {
-  const [tab, setTab]             = useState('holdings');  // 'holdings' | 'trades'
+  const [tab, setTab]             = useState('holdings');  // 'holdings' | 'trades' | 'settings'
   const [holdings, setHoldings]   = useState([]);
   const [trades, setTrades]       = useState([]);
   const [loading, setLoading]     = useState(true);
@@ -46,20 +57,30 @@ export default function Portfolio() {
   // inline price editing per symbol
   const [editingPrice, setEditingPrice] = useState(null);
   const [newPrice, setNewPrice]         = useState('');
+  // price poller config
+  const [priceCfg, setPriceCfg]         = useState(DEFAULT_PRICE_CFG);
+  const [priceCfgForm, setPriceCfgForm] = useState(DEFAULT_PRICE_CFG);
+  const [savingCfg, setSavingCfg]       = useState(false);
+  const [refreshing, setRefreshing]     = useState(false);
+  const [refreshResult, setRefreshResult] = useState(null);
 
-  const loadHoldings = () =>
-    fetch(`${API}/api/portfolio/holdings`).then(r => r.json()).then(setHoldings);
-  const loadTrades = () =>
-    fetch(`${API}/api/portfolio/trades`).then(r => r.json()).then(data => setTrades(data || []));
+  const loadHoldings = useCallback(() =>
+    fetch(`${API}/api/portfolio/holdings`).then(r => r.json()).then(setHoldings), []);
+  const loadTrades = useCallback(() =>
+    fetch(`${API}/api/portfolio/trades`).then(r => r.json()).then(data => setTrades(data || [])), []);
+  const loadPriceCfg = useCallback(() =>
+    fetch(`${API}/api/price-config`)
+      .then(r => r.json())
+      .then(cfg => { setPriceCfg(cfg); setPriceCfgForm(cfg); }), []);
 
-  const loadAll = () => {
+  const loadAll = useCallback(() => {
     setLoading(true);
-    Promise.all([loadHoldings(), loadTrades()])
+    Promise.all([loadHoldings(), loadTrades(), loadPriceCfg()])
       .catch(() => setError('Failed to load portfolio.'))
       .finally(() => setLoading(false));
-  };
+  }, [loadHoldings, loadTrades, loadPriceCfg]);
 
-  useEffect(loadAll, []);
+  useEffect(loadAll, [loadAll]);
 
   // Auto-compute fee & tax when market/type/qty/price changes (only if user hasn't overridden)
   const computed = calcFeeAndTax(form.market, form.type, form.quantity, form.price);
@@ -68,6 +89,46 @@ export default function Portfolio() {
 
   const handleFormChange = (field, value) =>
     setForm(f => ({ ...f, [field]: value }));
+
+  const handleSavePriceConfig = async (e) => {
+    e.preventDefault();
+    setSavingCfg(true);
+    try {
+      const payload = {
+        ...priceCfgForm,
+        interval_seconds: parseInt(priceCfgForm.interval_seconds, 10) || 300,
+      };
+      const res = await fetch(`${API}/api/price-config`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) throw new Error();
+      const saved = await res.json();
+      setPriceCfg(saved);
+      setPriceCfgForm(saved);
+      alert('Price settings saved.');
+    } catch {
+      alert('Failed to save price settings.');
+    } finally {
+      setSavingCfg(false);
+    }
+  };
+
+  const handleManualRefresh = async () => {
+    setRefreshing(true);
+    setRefreshResult(null);
+    try {
+      const res = await fetch(`${API}/api/price-refresh`, { method: 'POST' });
+      const data = await res.json();
+      setRefreshResult(data);
+      loadHoldings();
+    } catch {
+      alert('Refresh failed.');
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -158,6 +219,10 @@ export default function Portfolio() {
           className={`btn ${tab === 'trades' ? 'btn-primary' : 'btn-secondary'}`}
           onClick={() => setTab('trades')}
         >📋 Trade History</button>
+        <button
+          className={`btn ${tab === 'settings' ? 'btn-primary' : 'btn-secondary'}`}
+          onClick={() => setTab('settings')}
+        >⚙️ Price Settings</button>
       </div>
 
       {/* ── Holdings tab ── */}
@@ -182,6 +247,7 @@ export default function Portfolio() {
                   <th>Current Price</th>
                   <th>Value</th>
                   <th>Gain / Loss</th>
+                  <th style={{ color: '#718096', fontWeight: 'normal', fontSize: '0.82rem' }}>Price Updated</th>
                 </tr>
               </thead>
               <tbody>
@@ -209,7 +275,7 @@ export default function Portfolio() {
                       ) : (
                         <span
                           style={{ cursor: 'pointer', borderBottom: '1px dashed #a0aec0' }}
-                          title="Click to update price"
+                          title="Click to update price manually"
                           onClick={() => { setEditingPrice(h.symbol); setNewPrice(String(h.current_price)); }}
                         >
                           {fmt(h.current_price)}
@@ -220,6 +286,9 @@ export default function Portfolio() {
                     <td className={h.gain_loss >= 0 ? 'gain' : 'loss'}>
                       {fmt(h.gain_loss)}{' '}
                       <span style={{ fontSize: '0.82rem' }}>({fmtPct(h.gain_loss_pct)})</span>
+                    </td>
+                    <td style={{ color: '#a0aec0', fontSize: '0.78rem', whiteSpace: 'nowrap' }}>
+                      {fmtLastUpdated(h.last_updated)}
                     </td>
                   </tr>
                 ))}
@@ -287,6 +356,125 @@ export default function Portfolio() {
               </tbody>
             </table>
           )}
+        </div>
+      )}
+
+      {/* ── Price Settings tab ── */}
+      {tab === 'settings' && (
+        <div className="table-container" style={{ maxWidth: '600px' }}>
+          <div className="table-header">
+            <h2>⚙️ Price Polling Settings</h2>
+          </div>
+
+          <div style={{ padding: '1.25rem' }}>
+            {/* Current status */}
+            <div style={{
+              background: priceCfg.enabled ? '#f0fff4' : '#fffaf0',
+              border: `1px solid ${priceCfg.enabled ? '#9ae6b4' : '#fbd38d'}`,
+              borderRadius: '6px',
+              padding: '0.75rem 1rem',
+              marginBottom: '1.5rem',
+              fontSize: '0.9rem',
+            }}>
+              <strong>Status:</strong>{' '}
+              {priceCfg.enabled
+                ? `🟢 Polling ${priceCfg.source === 'yahoo' ? 'Yahoo Finance' : 'Alpha Vantage'} every ${priceCfg.interval_seconds}s`
+                : '🟡 Polling disabled — prices updated manually or via Refresh button'}
+            </div>
+
+            <form onSubmit={handleSavePriceConfig}>
+              <div className="form-group">
+                <label><strong>Price Source</strong></label>
+                <select
+                  value={priceCfgForm.source}
+                  onChange={e => setPriceCfgForm(f => ({ ...f, source: e.target.value }))}
+                >
+                  <option value="yahoo">Yahoo Finance (no API key needed)</option>
+                  <option value="alphavantage">Alpha Vantage (API key required, free tier available)</option>
+                </select>
+                <small style={{ color: '#718096', marginTop: '0.3rem', display: 'block' }}>
+                  Yahoo Finance is recommended for most users. Alpha Vantage free tier allows 25 requests/day total — with multiple holdings, polling may exhaust the daily quota quickly. Consider using a longer interval or upgrading your plan.
+                </small>
+              </div>
+
+              {priceCfgForm.source === 'alphavantage' && (
+                <div className="form-group">
+                  <label><strong>Alpha Vantage API Key</strong></label>
+                  <input
+                    type="password"
+                    value={priceCfgForm.api_key}
+                    onChange={e => setPriceCfgForm(f => ({ ...f, api_key: e.target.value }))}
+                    placeholder="Enter your API key from alphavantage.co"
+                  />
+                  <small style={{ color: '#718096', marginTop: '0.3rem', display: 'block' }}>
+                    Get a free API key at <a href="https://www.alphavantage.co/support/#api-key" target="_blank" rel="noopener noreferrer">alphavantage.co</a>
+                  </small>
+                </div>
+              )}
+
+              <div className="form-group">
+                <label><strong>Poll Interval (seconds)</strong></label>
+                <input
+                  type="number"
+                  min="60"
+                  max="86400"
+                  step="30"
+                  value={priceCfgForm.interval_seconds}
+                  onChange={e => setPriceCfgForm(f => ({ ...f, interval_seconds: e.target.value }))}
+                />
+                <small style={{ color: '#718096', marginTop: '0.3rem', display: 'block' }}>
+                  Minimum 60 seconds. 300 = 5 min, 3600 = 1 hour. Yahoo Finance rate-limits aggressive polling.
+                </small>
+              </div>
+
+              <div className="form-group" style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                <input
+                  type="checkbox"
+                  id="polling-enabled"
+                  checked={priceCfgForm.enabled}
+                  onChange={e => setPriceCfgForm(f => ({ ...f, enabled: e.target.checked }))}
+                  style={{ width: '18px', height: '18px', cursor: 'pointer' }}
+                />
+                <label htmlFor="polling-enabled" style={{ margin: 0, cursor: 'pointer' }}>
+                  <strong>Enable automatic background polling</strong>
+                </label>
+              </div>
+
+              <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1rem', flexWrap: 'wrap' }}>
+                <button type="submit" className="btn btn-primary" disabled={savingCfg}>
+                  {savingCfg ? 'Saving…' : '💾 Save Settings'}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={handleManualRefresh}
+                  disabled={refreshing}
+                >
+                  {refreshing ? 'Refreshing…' : '🔄 Refresh Now'}
+                </button>
+              </div>
+            </form>
+
+            {refreshResult && (
+              <div style={{
+                marginTop: '1rem',
+                background: '#ebf8ff',
+                border: '1px solid #90cdf4',
+                borderRadius: '6px',
+                padding: '0.75rem 1rem',
+                fontSize: '0.88rem',
+              }}>
+                <strong>Last refresh:</strong> updated {refreshResult.count} symbol{refreshResult.count !== 1 ? 's' : ''}.
+                {refreshResult.updated && Object.keys(refreshResult.updated).length > 0 && (
+                  <ul style={{ margin: '0.5rem 0 0', paddingLeft: '1.2rem' }}>
+                    {Object.entries(refreshResult.updated).map(([sym, price]) => (
+                      <li key={sym}>{sym}: ${Number(price).toFixed(2)}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+          </div>
         </div>
       )}
 

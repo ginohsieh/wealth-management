@@ -3,6 +3,7 @@ package store
 import (
 	"fmt"
 	"sync"
+	"time"
 )
 
 // Account represents a financial account
@@ -65,6 +66,19 @@ type Holding struct {
 	TotalCost    float64 `json:"total_cost"`    // quantity * avg_cost
 	GainLoss     float64 `json:"gain_loss"`     // value - total_cost
 	GainLossPct  float64 `json:"gain_loss_pct"` // gain_loss / total_cost * 100
+	LastUpdated  string  `json:"last_updated"`  // RFC3339 timestamp of last price fetch
+}
+
+// PriceConfig holds the configurable settings for the background price poller.
+type PriceConfig struct {
+	// Source selects the price provider: "yahoo" or "alphavantage"
+	Source          string `json:"source"`
+	// IntervalSeconds is how often to poll (minimum 60, default 300)
+	IntervalSeconds int    `json:"interval_seconds"`
+	// APIKey is required for Alpha Vantage; ignored for Yahoo
+	APIKey          string `json:"api_key"`
+	// Enabled turns polling on or off without changing other settings
+	Enabled         bool   `json:"enabled"`
 }
 
 // Summary represents an overall financial snapshot
@@ -89,18 +103,20 @@ type NetWorthSnapshot struct {
 }
 
 var (
-	mu                sync.RWMutex
-	accounts          []Account
-	transactions      []Transaction
-	assets            []Asset
-	trades            []PortfolioTrade
-	symbolPrices      map[string]float64 // current market price per symbol
-	snapshots         []NetWorthSnapshot
-	nextAccountID     = 5
-	nextTransactionID = 9
-	nextAssetID       = 5
-	nextTradeID       = 9
-	nextSnapshotID    = 1
+	mu                  sync.RWMutex
+	accounts            []Account
+	transactions        []Transaction
+	assets              []Asset
+	trades              []PortfolioTrade
+	symbolPrices        map[string]float64 // current market price per symbol
+	symbolLastUpdated   map[string]time.Time // when each symbol's price was last fetched
+	priceConfig         PriceConfig
+	snapshots           []NetWorthSnapshot
+	nextAccountID       = 5
+	nextTransactionID   = 9
+	nextAssetID         = 5
+	nextTradeID         = 9
+	nextSnapshotID      = 1
 )
 
 func init() {
@@ -139,6 +155,12 @@ func init() {
 		"GOOGL": 3100.00,
 		"MSFT":  415.00,
 		"BRK.B": 358.00,
+	}
+	symbolLastUpdated = map[string]time.Time{}
+	priceConfig = PriceConfig{
+		Source:          "yahoo",
+		IntervalSeconds: 300,
+		Enabled:         false,
 	}
 	trades = []PortfolioTrade{
 		{ID: "1", Symbol: "AAPL", Name: "Apple Inc.", Type: "buy", Date: "2023-11-15", Quantity: 10, Price: 150.00, Market: "US", Fee: 0, Tax: 0, Notes: "Initial position"},
@@ -385,11 +407,12 @@ func DeleteTrade(id string) bool {
 	return false
 }
 
-// SetSymbolPrice updates the current market price for a symbol
+// SetSymbolPrice updates the current market price for a symbol and records the update time.
 func SetSymbolPrice(symbol string, price float64) {
 	mu.Lock()
 	defer mu.Unlock()
 	symbolPrices[symbol] = price
+	symbolLastUpdated[symbol] = time.Now()
 }
 
 // computeHoldings aggregates all trades into per-symbol holdings.
@@ -442,6 +465,11 @@ func computeHoldings() []Holding {
 			gainLossPct = gainLoss / totalCost * 100
 		}
 
+		lastUpdated := ""
+		if t, ok := symbolLastUpdated[sym]; ok {
+			lastUpdated = t.UTC().Format(time.RFC3339)
+		}
+
 		holdings = append(holdings, Holding{
 			Symbol:       sym,
 			Name:         a.name,
@@ -452,6 +480,7 @@ func computeHoldings() []Holding {
 			TotalCost:    totalCost,
 			GainLoss:     gainLoss,
 			GainLossPct:  gainLossPct,
+			LastUpdated:  lastUpdated,
 		})
 	}
 	return holdings
@@ -567,4 +596,32 @@ func RecordSnapshot(date string) NetWorthSnapshot {
 	nextSnapshotID++
 	snapshots = append(snapshots, snap)
 	return snap
+}
+
+// GetPriceConfig returns the current poller configuration
+func GetPriceConfig() PriceConfig {
+	mu.RLock()
+	defer mu.RUnlock()
+	return priceConfig
+}
+
+// SetPriceConfig replaces the poller configuration
+func SetPriceConfig(cfg PriceConfig) {
+	mu.Lock()
+	defer mu.Unlock()
+	if cfg.IntervalSeconds < 60 {
+		cfg.IntervalSeconds = 60
+	}
+	priceConfig = cfg
+}
+
+// GetTrackedSymbols returns the list of symbols that have prices tracked
+func GetTrackedSymbols() []string {
+	mu.RLock()
+	defer mu.RUnlock()
+	syms := make([]string, 0, len(symbolPrices))
+	for s := range symbolPrices {
+		syms = append(syms, s)
+	}
+	return syms
 }

@@ -4,6 +4,7 @@ import (
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/ginohsieh/wealth-management/backend/handlers"
+	"github.com/ginohsieh/wealth-management/backend/poller"
 )
 
 func main() {
@@ -20,6 +21,9 @@ func main() {
 	r.GET("/api/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok"})
 	})
+
+	// Start background price poller (honours the config's Enabled flag)
+	poller.Start()
 
 	api := r.Group("/api")
 	{
@@ -46,6 +50,11 @@ func main() {
 		api.GET("/portfolio/holdings", handlers.GetHoldings)
 		api.PUT("/portfolio/holdings/:symbol/price", handlers.UpdateSymbolPrice)
 		api.POST("/portfolio/calc-fees", handlers.CalcFeeAndTax)
+
+		// Price polling configuration
+		api.GET("/price-config", handlers.GetPriceConfig)
+		api.PUT("/price-config", handlers.UpdatePriceConfig)
+		api.POST("/price-refresh", handlers.ManualRefresh)
 
 		api.GET("/snapshots", handlers.GetSnapshots)
 		api.POST("/snapshots", handlers.RecordSnapshot)
