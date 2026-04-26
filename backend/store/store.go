@@ -406,14 +406,17 @@ tradeDate = time.Now()
 settlementDate := CalcSettlementDate(t.Market, tradeDate)
 
 if t.Subtype == "stock_buy" {
-// Increase securities account NAV by the market value of the purchase.
+// Debit the securities account by the full trade cost (amount is already
+// negative from the client, e.g. -(qty*price + fee)).  Balance goes negative
+// representing the pending cash obligation until settlement.
 if _, err = tx.Exec(
 `UPDATE accounts SET balance = balance + $1 WHERE id = $2`,
-marketValue, t.AccountID,
+t.Amount, t.AccountID,
 ); err != nil {
 return Transaction{}, err
 }
-// Create pending settlement: bank account will be debited on settlement date.
+// Create pending settlement: on settlement date the securities account is
+// credited back to zero and the bank account is debited.
 settlementAmount := marketValue + fee + tax
 if _, err = tx.Exec(
 `INSERT INTO pending_settlements
@@ -427,14 +430,17 @@ t.Date, settlementDate.Format("2006-01-02"),
 return Transaction{}, err
 }
 } else { // stock_sell
-// Decrease securities account NAV by the market value of the sale.
+// Credit the securities account by net proceeds (amount is already positive
+// from the client, e.g. qty*price - fee - tax).  Balance is positive until
+// settlement, when the proceeds transfer to the bank account.
 if _, err = tx.Exec(
-`UPDATE accounts SET balance = balance - $1 WHERE id = $2`,
-marketValue, t.AccountID,
+`UPDATE accounts SET balance = balance + $1 WHERE id = $2`,
+t.Amount, t.AccountID,
 ); err != nil {
 return Transaction{}, err
 }
-// Create pending settlement: bank account will be credited on settlement date.
+// Create pending settlement: on settlement date the securities account is
+// debited back to zero and the bank account is credited.
 netProceeds := marketValue - fee - tax
 if _, err = tx.Exec(
 `INSERT INTO pending_settlements
@@ -522,21 +528,29 @@ return result, rows.Err()
 
 // SettlePendingTransactions processes all pending settlements whose
 // settlement_date is on or before today. For each:
-//   - stock_buy:  bank account is debited by the settlement amount
-//   - stock_sell: bank account is credited by the net proceeds
+//   - stock_buy:  securities account is credited (back to 0) and bank account
+//     is debited; matching transaction records are inserted in both accounts.
+//   - stock_sell: securities account is debited (back to 0) and bank account
+//     is credited; matching transaction records are inserted in both accounts.
 //
-// Settlements without a bank_account_id are marked settled without touching
-// any account balance (the user can reconcile manually).
+// Settlements without a bank_account_id still restore the securities account
+// balance to zero; the bank-side transaction is skipped.
 //
 // The function returns the number of settlements processed.
 func SettlePendingTransactions() (int, error) {
 today := time.Now().Format("2006-01-02")
 
 rows, err := db.Query(
-`SELECT id, COALESCE(bank_account_id::TEXT,''), trade_type, amount
- FROM pending_settlements
- WHERE status='pending' AND settlement_date <= $1
- ORDER BY settlement_date`,
+`SELECT ps.id,
+        COALESCE(ps.bank_account_id::TEXT,''),
+        ps.securities_account_id::TEXT,
+        ps.trade_type, ps.amount,
+        ps.settlement_date::TEXT,
+        COALESCE(t.symbol,'')
+ FROM pending_settlements ps
+ JOIN transactions t ON t.id = ps.transaction_id
+ WHERE ps.status='pending' AND ps.settlement_date <= $1
+ ORDER BY ps.settlement_date`,
 today,
 )
 if err != nil {
@@ -545,15 +559,19 @@ return 0, err
 defer rows.Close()
 
 type pendingRow struct {
-id            int
-bankAccountID string
-tradeType     string
-amount        float64
+id                  int
+bankAccountID       string
+securitiesAccountID string
+tradeType           string
+amount              float64
+settlementDate      string
+symbol              string
 }
 var pending []pendingRow
 for rows.Next() {
 var p pendingRow
-if err := rows.Scan(&p.id, &p.bankAccountID, &p.tradeType, &p.amount); err != nil {
+if err := rows.Scan(&p.id, &p.bankAccountID, &p.securitiesAccountID,
+&p.tradeType, &p.amount, &p.settlementDate, &p.symbol); err != nil {
 return 0, err
 }
 pending = append(pending, p)
@@ -578,20 +596,73 @@ _ = tx.Rollback()
 
 settled := 0
 for _, p := range pending {
-if p.bankAccountID != "" {
-var delta float64
-if p.tradeType == "buy" {
-delta = -p.amount // debit bank account
-} else {
-delta = p.amount // credit bank account
+var (
+secDelta  float64 // balance change for securities account
+bankDelta float64 // balance change for bank account
+secType   string  // transaction type label for securities account
+bankType  string  // transaction type label for bank account
+desc      string
+)
+
+if p.symbol != "" {
+desc = p.symbol + " "
 }
+
+if p.tradeType == "buy" {
+// Securities account was debited at trade time (negative balance).
+// Credit it back to zero now.
+secDelta = p.amount
+secType = "income"
+// Bank account is debited (cash leaves).
+bankDelta = -p.amount
+bankType = "expense"
+desc += "交割付款 (Settlement debit)"
+} else {
+// Securities account was credited at trade time (positive balance).
+// Debit it back to zero now.
+secDelta = -p.amount
+secType = "expense"
+// Bank account is credited (cash arrives).
+bankDelta = p.amount
+bankType = "income"
+desc += "交割收款 (Settlement credit)"
+}
+
+// Restore securities account balance.
 if _, err = tx.Exec(
 `UPDATE accounts SET balance = balance + $1 WHERE id = $2`,
-delta, p.bankAccountID,
+secDelta, p.securitiesAccountID,
+); err != nil {
+return 0, err
+}
+
+// Insert settlement transaction in securities account.
+if _, err = tx.Exec(
+`INSERT INTO transactions(account_id, date, description, amount, category, type, subtype)
+ VALUES($1,$2,$3,$4,'Investment',$5,'settlement')`,
+p.securitiesAccountID, p.settlementDate, desc, secDelta, secType,
+); err != nil {
+return 0, err
+}
+
+if p.bankAccountID != "" {
+// Apply bank account balance change.
+if _, err = tx.Exec(
+`UPDATE accounts SET balance = balance + $1 WHERE id = $2`,
+bankDelta, p.bankAccountID,
+); err != nil {
+return 0, err
+}
+// Insert settlement transaction in bank account.
+if _, err = tx.Exec(
+`INSERT INTO transactions(account_id, date, description, amount, category, type, subtype)
+ VALUES($1,$2,$3,$4,'Investment',$5,'settlement')`,
+p.bankAccountID, p.settlementDate, desc, bankDelta, bankType,
 ); err != nil {
 return 0, err
 }
 }
+
 if _, err = tx.Exec(
 `UPDATE pending_settlements SET status='settled' WHERE id=$1`, p.id,
 ); err != nil {
@@ -606,27 +677,59 @@ return 0, err
 return settled, nil
 }
 
-// ForceSettle marks a single pending settlement as settled and applies the
-// corresponding bank account balance change. Returns false when the settlement
-// does not exist or is already settled.
+// ForceSettle marks a single pending settlement as settled, restores the
+// securities account balance to zero, and (when a bank account is linked)
+// inserts matching transaction records in both accounts and adjusts the bank
+// account balance.  Returns false when the settlement does not exist or is
+// already settled.
 func ForceSettle(id string) (PendingSettlement, bool, error) {
 var p PendingSettlement
 var dbID, txID, secAccID int
+var symbol string
 
 err := db.QueryRow(
-`SELECT id, transaction_id, securities_account_id,
-        COALESCE(bank_account_id::TEXT,''), trade_type, amount, market,
-        trade_date::TEXT, settlement_date::TEXT, status, created_at::TEXT
- FROM pending_settlements WHERE id=$1 AND status='pending'`,
+`SELECT ps.id, ps.transaction_id, ps.securities_account_id,
+        COALESCE(ps.bank_account_id::TEXT,''), ps.trade_type, ps.amount, ps.market,
+        ps.trade_date::TEXT, ps.settlement_date::TEXT, ps.status, ps.created_at::TEXT,
+        COALESCE(t.symbol,'')
+ FROM pending_settlements ps
+ JOIN transactions t ON t.id = ps.transaction_id
+ WHERE ps.id=$1 AND ps.status='pending'`,
 id,
 ).Scan(&dbID, &txID, &secAccID, &p.BankAccountID, &p.TradeType, &p.Amount, &p.Market,
-&p.TradeDate, &p.SettlementDate, &p.Status, &p.CreatedAt)
+&p.TradeDate, &p.SettlementDate, &p.Status, &p.CreatedAt, &symbol)
 if err == sql.ErrNoRows {
 return PendingSettlement{}, false, nil
 }
 if err != nil {
 return PendingSettlement{}, false, err
 }
+
+var (
+secDelta  float64
+bankDelta float64
+secType   string
+bankType  string
+desc      string
+)
+if symbol != "" {
+desc = symbol + " "
+}
+if p.TradeType == "buy" {
+secDelta = p.Amount
+secType = "income"
+bankDelta = -p.Amount
+bankType = "expense"
+desc += "交割付款 (Settlement debit)"
+} else {
+secDelta = -p.Amount
+secType = "expense"
+bankDelta = p.Amount
+bankType = "income"
+desc += "交割收款 (Settlement credit)"
+}
+
+secAccIDStr := fmt.Sprintf("%d", secAccID)
 
 tx, txErr := db.Begin()
 if txErr != nil {
@@ -639,20 +742,38 @@ _ = tx.Rollback()
 }
 }()
 
-if p.BankAccountID != "" {
-var delta float64
-if p.TradeType == "buy" {
-delta = -p.Amount
-} else {
-delta = p.Amount
-}
+// Restore securities account balance to zero.
 if _, commitErr = tx.Exec(
 `UPDATE accounts SET balance = balance + $1 WHERE id = $2`,
-delta, p.BankAccountID,
+secDelta, secAccIDStr,
+); commitErr != nil {
+return PendingSettlement{}, false, commitErr
+}
+// Insert settlement transaction in securities account.
+if _, commitErr = tx.Exec(
+`INSERT INTO transactions(account_id, date, description, amount, category, type, subtype)
+ VALUES($1,$2,$3,$4,'Investment',$5,'settlement')`,
+secAccIDStr, p.SettlementDate, desc, secDelta, secType,
+); commitErr != nil {
+return PendingSettlement{}, false, commitErr
+}
+
+if p.BankAccountID != "" {
+if _, commitErr = tx.Exec(
+`UPDATE accounts SET balance = balance + $1 WHERE id = $2`,
+bankDelta, p.BankAccountID,
+); commitErr != nil {
+return PendingSettlement{}, false, commitErr
+}
+if _, commitErr = tx.Exec(
+`INSERT INTO transactions(account_id, date, description, amount, category, type, subtype)
+ VALUES($1,$2,$3,$4,'Investment',$5,'settlement')`,
+p.BankAccountID, p.SettlementDate, desc, bankDelta, bankType,
 ); commitErr != nil {
 return PendingSettlement{}, false, commitErr
 }
 }
+
 if _, commitErr = tx.Exec(
 `UPDATE pending_settlements SET status='settled' WHERE id=$1`, dbID,
 ); commitErr != nil {
