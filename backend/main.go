@@ -38,6 +38,9 @@ func main() {
 		api.POST("/portfolio", handlers.CreateAsset)
 		api.PUT("/portfolio/:id", handlers.UpdateAsset)
 		api.DELETE("/portfolio/:id", handlers.DeleteAsset)
+
+		api.GET("/snapshots", handlers.GetSnapshots)
+		api.POST("/snapshots", handlers.RecordSnapshot)
 	}
 
 	r.Run(":8080")

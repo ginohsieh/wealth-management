@@ -8,13 +8,14 @@ A local web service for personal wealth management, built with a Go backend API 
 - **Accounts** — manage bank, savings, investment, and credit accounts
 - **Transactions** — record and filter income / expense transactions
 - **Portfolio** — track investment holdings with gain / loss calculations
+- **History** — record and browse daily net worth snapshots; see day-over-day change
 
 ## Tech Stack
 
 | Layer     | Technology              |
 |-----------|-------------------------|
 | Backend   | Go 1.21 + Gin           |
-| Frontend  | React 18 + react-scripts |
+| Frontend  | React 18 + Vite          |
 | Proxy     | Nginx                   |
 | Container | Docker + Docker Compose |
 
@@ -55,7 +56,7 @@ npm start
 # UI available at http://localhost:3000
 ```
 
-The `.env.development` file already points the frontend at `http://localhost:8080`, so no extra configuration is needed.
+The frontend uses `VITE_API_URL` to point at the backend; in dev the Vite proxy handles `/api` requests automatically.
 
 ## API Reference
 
@@ -74,6 +75,8 @@ The `.env.development` file already points the frontend at `http://localhost:808
 | POST   | /api/portfolio     | Add portfolio asset   |
 | PUT    | /api/portfolio/:id | Update portfolio asset |
 | DELETE | /api/portfolio/:id | Remove portfolio asset |
+| GET    | /api/snapshots     | List daily net worth snapshots |
+| POST   | /api/snapshots     | Record snapshot for a date    |
 
 ## Project Structure
 

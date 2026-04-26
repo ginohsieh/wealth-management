@@ -49,14 +49,26 @@ type Summary struct {
 	PortfolioValue   float64 `json:"portfolio_value"`
 }
 
+// NetWorthSnapshot records a point-in-time financial summary for a given date.
+type NetWorthSnapshot struct {
+	ID             string  `json:"id"`
+	Date           string  `json:"date"`
+	PortfolioValue float64 `json:"portfolio_value"`
+	TotalAssets    float64 `json:"total_assets"`
+	TotalLiabilities float64 `json:"total_liabilities"`
+	NetWorth       float64 `json:"net_worth"`
+}
+
 var (
 	mu                sync.RWMutex
 	accounts          []Account
 	transactions      []Transaction
 	assets            []Asset
+	snapshots         []NetWorthSnapshot
 	nextAccountID     = 5
 	nextTransactionID = 9
 	nextAssetID       = 5
+	nextSnapshotID    = 1
 )
 
 func init() {
@@ -88,6 +100,15 @@ func init() {
 	for i := range assets {
 		assets[i] = calculateAssetFields(assets[i])
 	}
+
+	snapshots = []NetWorthSnapshot{
+		{ID: "1", Date: "2024-04-20", PortfolioValue: 38200.00, TotalAssets: 62000.00, TotalLiabilities: 900.00, NetWorth: 61100.00},
+		{ID: "2", Date: "2024-04-21", PortfolioValue: 39100.00, TotalAssets: 62450.00, TotalLiabilities: 1050.00, NetWorth: 61400.00},
+		{ID: "3", Date: "2024-04-22", PortfolioValue: 40500.00, TotalAssets: 63100.00, TotalLiabilities: 1100.00, NetWorth: 62000.00},
+		{ID: "4", Date: "2024-04-23", PortfolioValue: 41200.00, TotalAssets: 63800.00, TotalLiabilities: 1150.00, NetWorth: 62650.00},
+		{ID: "5", Date: "2024-04-24", PortfolioValue: 42000.00, TotalAssets: 64200.00, TotalLiabilities: 1200.00, NetWorth: 63000.00},
+	}
+	nextSnapshotID = 6
 }
 
 func calculateAssetFields(a Asset) Asset {
@@ -274,4 +295,56 @@ func GetSummary() Summary {
 		MonthlySavings:   monthlyIncome - monthlyExpenses,
 		PortfolioValue:   portfolioValue,
 	}
+}
+
+// GetSnapshots returns all recorded net worth snapshots
+func GetSnapshots() []NetWorthSnapshot {
+	mu.RLock()
+	defer mu.RUnlock()
+	result := make([]NetWorthSnapshot, len(snapshots))
+	copy(result, snapshots)
+	return result
+}
+
+// RecordSnapshot captures the current financial state for the given date.
+// If a snapshot already exists for that date it is replaced.
+func RecordSnapshot(date string) NetWorthSnapshot {
+	mu.Lock()
+	defer mu.Unlock()
+
+	var totalAssets, totalLiabilities float64
+	for _, a := range accounts {
+		if a.Balance >= 0 {
+			totalAssets += a.Balance
+		} else {
+			totalLiabilities += -a.Balance
+		}
+	}
+
+	var portfolioValue float64
+	for _, a := range assets {
+		portfolioValue += a.Value
+	}
+
+	snap := NetWorthSnapshot{
+		Date:             date,
+		PortfolioValue:   portfolioValue,
+		TotalAssets:      totalAssets,
+		TotalLiabilities: totalLiabilities,
+		NetWorth:         totalAssets - totalLiabilities,
+	}
+
+	// Replace existing snapshot for the same date if present
+	for i, s := range snapshots {
+		if s.Date == date {
+			snap.ID = s.ID
+			snapshots[i] = snap
+			return snap
+		}
+	}
+
+	snap.ID = fmt.Sprintf("%d", nextSnapshotID)
+	nextSnapshotID++
+	snapshots = append(snapshots, snap)
+	return snap
 }
