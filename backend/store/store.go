@@ -6,6 +6,34 @@ import (
 "time"
 )
 
+// settlementDays returns the number of business days from trade date to settlement
+// for the given market.
+//
+//   TW  – T+2
+//   US  – T+1 (US equity markets moved to T+1 settlement in May 2024)
+//   HK  – T+2
+//   OTHER / "" – T+2
+func settlementDays(market string) int {
+if market == "US" {
+return 1
+}
+return 2
+}
+
+// CalcSettlementDate returns the settlement date for a trade, skipping Saturdays
+// and Sundays. Public holidays are not modelled in the current implementation.
+func CalcSettlementDate(market string, tradeDate time.Time) time.Time {
+days := settlementDays(market)
+d := tradeDate
+for added := 0; added < days; {
+d = d.AddDate(0, 0, 1)
+if d.Weekday() != time.Saturday && d.Weekday() != time.Sunday {
+added++
+}
+}
+return d
+}
+
 // Account represents a financial account
 type Account struct {
 ID       string  `json:"id"`
@@ -18,21 +46,24 @@ Currency string  `json:"currency"`
 // Transaction represents a financial transaction.
 // For investment trades set Subtype to "stock_buy" or "stock_sell" and fill
 // Symbol, Quantity, Price, Market. Fee and Tax are auto-calculated when left 0.
+// BankAccountID is required for stock_buy / stock_sell to identify the bank
+// account that will be debited (buy) or credited (sell) on settlement date.
 type Transaction struct {
-ID          string   `json:"id"`
-AccountID   string   `json:"account_id"`
-Date        string   `json:"date"`
-Description string   `json:"description"`
-Amount      float64  `json:"amount"`
-Category    string   `json:"category"`
-Type        string   `json:"type"`    // income, expense
-Subtype     string   `json:"subtype"` // stock_buy, stock_sell, dividend, fee, ""
-Symbol      string   `json:"symbol,omitempty"`
-Quantity    *float64 `json:"quantity,omitempty"`
-Price       *float64 `json:"price,omitempty"`
-Market      string   `json:"market,omitempty"`
-Fee         *float64 `json:"fee,omitempty"`
-Tax         *float64 `json:"tax,omitempty"`
+ID            string   `json:"id"`
+AccountID     string   `json:"account_id"`
+BankAccountID string   `json:"bank_account_id,omitempty"`
+Date          string   `json:"date"`
+Description   string   `json:"description"`
+Amount        float64  `json:"amount"`
+Category      string   `json:"category"`
+Type          string   `json:"type"`    // income, expense
+Subtype       string   `json:"subtype"` // stock_buy, stock_sell, dividend, fee, ""
+Symbol        string   `json:"symbol,omitempty"`
+Quantity      *float64 `json:"quantity,omitempty"`
+Price         *float64 `json:"price,omitempty"`
+Market        string   `json:"market,omitempty"`
+Fee           *float64 `json:"fee,omitempty"`
+Tax           *float64 `json:"tax,omitempty"`
 }
 
 // PortfolioPosition represents an investment holding in the legacy flat model.
@@ -131,6 +162,27 @@ PortfolioValue   float64 `json:"portfolio_value"`
 TotalAssets      float64 `json:"total_assets"`
 TotalLiabilities float64 `json:"total_liabilities"`
 NetWorth         float64 `json:"net_worth"`
+}
+
+// PendingSettlement records a deferred cash transfer created when a stock_buy
+// or stock_sell transaction is booked.  On settlement date the system debits
+// (buy) or credits (sell) the designated bank account.
+//
+//   trade_type: "buy"  – bank_account is debited by Amount on SettlementDate
+//   trade_type: "sell" – bank_account is credited by Amount on SettlementDate
+//   status:     "pending" | "settled"
+type PendingSettlement struct {
+ID                  string  `json:"id"`
+TransactionID       string  `json:"transaction_id"`
+SecuritiesAccountID string  `json:"securities_account_id"`
+BankAccountID       string  `json:"bank_account_id,omitempty"`
+TradeType           string  `json:"trade_type"`
+Amount              float64 `json:"amount"`
+Market              string  `json:"market"`
+TradeDate           string  `json:"trade_date"`
+SettlementDate      string  `json:"settlement_date"`
+Status              string  `json:"status"`
+CreatedAt           string  `json:"created_at"`
 }
 
 // AccountGroup is a named collection of accounts for aggregate reporting.
@@ -252,7 +304,7 @@ return n > 0, nil
 func GetTransactions(accountID string) ([]Transaction, error) {
 var rows *sql.Rows
 var err error
-q := `SELECT id, account_id, date, description, amount, category, type,
+q := `SELECT id, account_id, COALESCE(bank_account_id::TEXT,''), date, description, amount, category, type,
              COALESCE(subtype,''), COALESCE(symbol,''), quantity, price,
              COALESCE(market,''), tx_fee, tx_tax
       FROM transactions`
@@ -270,7 +322,7 @@ result := []Transaction{}
 for rows.Next() {
 var t Transaction
 var id, accountIDInt int
-if err := rows.Scan(&id, &accountIDInt, &t.Date, &t.Description,
+if err := rows.Scan(&id, &accountIDInt, &t.BankAccountID, &t.Date, &t.Description,
 &t.Amount, &t.Category, &t.Type,
 &t.Subtype, &t.Symbol, &t.Quantity, &t.Price,
 &t.Market, &t.Fee, &t.Tax); err != nil {
@@ -284,9 +336,17 @@ return result, rows.Err()
 }
 
 // CreateTransaction inserts a new transaction and returns it with a generated ID.
-// For stock_buy / stock_sell subtypes, fee and tax are auto-calculated from market
-// rules when the caller leaves them nil or zero.
-// The linked account's balance is updated atomically in the same database transaction.
+//
+// For stock_buy / stock_sell subtypes the double-entry settlement flow is used:
+//   - T+0 (trade date): the securities account NAV is adjusted immediately
+//     (increased for a buy, decreased for a sell) and a pending_settlement record
+//     is created.  The bank account is NOT touched yet.
+//   - T+N (settlement date): SettlePendingTransactions debits (buy) or credits
+//     (sell) the bank account and marks the settlement as settled.
+//
+// For all other subtypes the account balance is updated immediately.
+//
+// Fee and tax are auto-calculated from market rules when left nil or zero.
 func CreateTransaction(t Transaction) (Transaction, error) {
 // Auto-calculate fee/tax for investment trades
 if t.Subtype == "stock_buy" || t.Subtype == "stock_sell" {
@@ -314,10 +374,10 @@ _ = tx.Rollback()
 
 var id int
 err = tx.QueryRow(
-`INSERT INTO transactions(account_id, date, description, amount, category, type,
+`INSERT INTO transactions(account_id, bank_account_id, date, description, amount, category, type,
                           subtype, symbol, quantity, price, market, tx_fee, tx_tax)
- VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
-t.AccountID, t.Date, t.Description, t.Amount, t.Category, t.Type,
+ VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id`,
+t.AccountID, nullableStr(t.BankAccountID), t.Date, t.Description, t.Amount, t.Category, t.Type,
 nullableStr(t.Subtype), nullableStr(t.Symbol), t.Quantity, t.Price,
 nullableStr(t.Market), t.Fee, t.Tax,
 ).Scan(&id)
@@ -325,12 +385,77 @@ if err != nil {
 return Transaction{}, err
 }
 
-// Update account balance to reflect this transaction
+isStockTrade := (t.Subtype == "stock_buy" || t.Subtype == "stock_sell") &&
+t.Quantity != nil && t.Price != nil
+
+if isStockTrade {
+marketValue := *t.Quantity * *t.Price
+fee := 0.0
+tax := 0.0
+if t.Fee != nil {
+fee = *t.Fee
+}
+if t.Tax != nil {
+tax = *t.Tax
+}
+
+tradeDate, parseErr := time.Parse("2006-01-02", t.Date)
+if parseErr != nil {
+tradeDate = time.Now()
+}
+settlementDate := CalcSettlementDate(t.Market, tradeDate)
+
+if t.Subtype == "stock_buy" {
+// Increase securities account NAV by the market value of the purchase.
+if _, err = tx.Exec(
+`UPDATE accounts SET balance = balance + $1 WHERE id = $2`,
+marketValue, t.AccountID,
+); err != nil {
+return Transaction{}, err
+}
+// Create pending settlement: bank account will be debited on settlement date.
+settlementAmount := marketValue + fee + tax
+if _, err = tx.Exec(
+`INSERT INTO pending_settlements
+ (transaction_id, securities_account_id, bank_account_id, trade_type, amount,
+  market, trade_date, settlement_date, status)
+ VALUES($1,$2,$3,'buy',$4,$5,$6,$7,'pending')`,
+id, t.AccountID, nullableStr(t.BankAccountID),
+settlementAmount, t.Market,
+t.Date, settlementDate.Format("2006-01-02"),
+); err != nil {
+return Transaction{}, err
+}
+} else { // stock_sell
+// Decrease securities account NAV by the market value of the sale.
+if _, err = tx.Exec(
+`UPDATE accounts SET balance = balance - $1 WHERE id = $2`,
+marketValue, t.AccountID,
+); err != nil {
+return Transaction{}, err
+}
+// Create pending settlement: bank account will be credited on settlement date.
+netProceeds := marketValue - fee - tax
+if _, err = tx.Exec(
+`INSERT INTO pending_settlements
+ (transaction_id, securities_account_id, bank_account_id, trade_type, amount,
+  market, trade_date, settlement_date, status)
+ VALUES($1,$2,$3,'sell',$4,$5,$6,$7,'pending')`,
+id, t.AccountID, nullableStr(t.BankAccountID),
+netProceeds, t.Market,
+t.Date, settlementDate.Format("2006-01-02"),
+); err != nil {
+return Transaction{}, err
+}
+}
+} else {
+// Non-stock transactions: update balance immediately.
 if _, err = tx.Exec(
 `UPDATE accounts SET balance = balance + $1 WHERE id = $2`,
 t.Amount, t.AccountID,
 ); err != nil {
 return Transaction{}, err
+}
 }
 
 if err = tx.Commit(); err != nil {
@@ -355,6 +480,193 @@ if s == "" {
 return nil
 }
 return s
+}
+
+// ── Pending Settlements ───────────────────────────────────────────────────────
+
+// GetPendingSettlements returns settlement records, optionally filtered by
+// status ("pending", "settled", or "" for all).
+func GetPendingSettlements(status string) ([]PendingSettlement, error) {
+q := `SELECT id, transaction_id, securities_account_id,
+             COALESCE(bank_account_id::TEXT,''), trade_type, amount, market,
+             trade_date::TEXT, settlement_date::TEXT, status, created_at::TEXT
+      FROM pending_settlements`
+var rows *sql.Rows
+var err error
+if status != "" {
+rows, err = db.Query(q+` WHERE status=$1 ORDER BY settlement_date`, status)
+} else {
+rows, err = db.Query(q + ` ORDER BY settlement_date`)
+}
+if err != nil {
+return nil, err
+}
+defer rows.Close()
+
+result := []PendingSettlement{}
+for rows.Next() {
+var s PendingSettlement
+var id, txID, secAccID int
+if err := rows.Scan(&id, &txID, &secAccID, &s.BankAccountID,
+&s.TradeType, &s.Amount, &s.Market,
+&s.TradeDate, &s.SettlementDate, &s.Status, &s.CreatedAt); err != nil {
+return nil, err
+}
+s.ID = fmt.Sprintf("%d", id)
+s.TransactionID = fmt.Sprintf("%d", txID)
+s.SecuritiesAccountID = fmt.Sprintf("%d", secAccID)
+result = append(result, s)
+}
+return result, rows.Err()
+}
+
+// SettlePendingTransactions processes all pending settlements whose
+// settlement_date is on or before today. For each:
+//   - stock_buy:  bank account is debited by the settlement amount
+//   - stock_sell: bank account is credited by the net proceeds
+//
+// Settlements without a bank_account_id are marked settled without touching
+// any account balance (the user can reconcile manually).
+//
+// The function returns the number of settlements processed.
+func SettlePendingTransactions() (int, error) {
+today := time.Now().Format("2006-01-02")
+
+rows, err := db.Query(
+`SELECT id, COALESCE(bank_account_id::TEXT,''), trade_type, amount
+ FROM pending_settlements
+ WHERE status='pending' AND settlement_date <= $1
+ ORDER BY settlement_date`,
+today,
+)
+if err != nil {
+return 0, err
+}
+defer rows.Close()
+
+type pendingRow struct {
+id            int
+bankAccountID string
+tradeType     string
+amount        float64
+}
+var pending []pendingRow
+for rows.Next() {
+var p pendingRow
+if err := rows.Scan(&p.id, &p.bankAccountID, &p.tradeType, &p.amount); err != nil {
+return 0, err
+}
+pending = append(pending, p)
+}
+if err := rows.Err(); err != nil {
+return 0, err
+}
+
+if len(pending) == 0 {
+return 0, nil
+}
+
+tx, err := db.Begin()
+if err != nil {
+return 0, err
+}
+defer func() {
+if err != nil {
+_ = tx.Rollback()
+}
+}()
+
+settled := 0
+for _, p := range pending {
+if p.bankAccountID != "" {
+var delta float64
+if p.tradeType == "buy" {
+delta = -p.amount // debit bank account
+} else {
+delta = p.amount // credit bank account
+}
+if _, err = tx.Exec(
+`UPDATE accounts SET balance = balance + $1 WHERE id = $2`,
+delta, p.bankAccountID,
+); err != nil {
+return 0, err
+}
+}
+if _, err = tx.Exec(
+`UPDATE pending_settlements SET status='settled' WHERE id=$1`, p.id,
+); err != nil {
+return 0, err
+}
+settled++
+}
+
+if err = tx.Commit(); err != nil {
+return 0, err
+}
+return settled, nil
+}
+
+// ForceSettle marks a single pending settlement as settled and applies the
+// corresponding bank account balance change. Returns false when the settlement
+// does not exist or is already settled.
+func ForceSettle(id string) (PendingSettlement, bool, error) {
+var p PendingSettlement
+var dbID, txID, secAccID int
+
+err := db.QueryRow(
+`SELECT id, transaction_id, securities_account_id,
+        COALESCE(bank_account_id::TEXT,''), trade_type, amount, market,
+        trade_date::TEXT, settlement_date::TEXT, status, created_at::TEXT
+ FROM pending_settlements WHERE id=$1 AND status='pending'`,
+id,
+).Scan(&dbID, &txID, &secAccID, &p.BankAccountID, &p.TradeType, &p.Amount, &p.Market,
+&p.TradeDate, &p.SettlementDate, &p.Status, &p.CreatedAt)
+if err == sql.ErrNoRows {
+return PendingSettlement{}, false, nil
+}
+if err != nil {
+return PendingSettlement{}, false, err
+}
+
+tx, txErr := db.Begin()
+if txErr != nil {
+return PendingSettlement{}, false, txErr
+}
+var commitErr error
+defer func() {
+if commitErr != nil {
+_ = tx.Rollback()
+}
+}()
+
+if p.BankAccountID != "" {
+var delta float64
+if p.TradeType == "buy" {
+delta = -p.Amount
+} else {
+delta = p.Amount
+}
+if _, commitErr = tx.Exec(
+`UPDATE accounts SET balance = balance + $1 WHERE id = $2`,
+delta, p.BankAccountID,
+); commitErr != nil {
+return PendingSettlement{}, false, commitErr
+}
+}
+if _, commitErr = tx.Exec(
+`UPDATE pending_settlements SET status='settled' WHERE id=$1`, dbID,
+); commitErr != nil {
+return PendingSettlement{}, false, commitErr
+}
+if commitErr = tx.Commit(); commitErr != nil {
+return PendingSettlement{}, false, commitErr
+}
+
+p.ID = fmt.Sprintf("%d", dbID)
+p.TransactionID = fmt.Sprintf("%d", txID)
+p.SecuritiesAccountID = fmt.Sprintf("%d", secAccID)
+p.Status = "settled"
+return p, true, nil
 }
 
 // ── PortfolioPositions (legacy flat portfolio) ────────────────────────────────

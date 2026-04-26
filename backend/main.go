@@ -43,6 +43,8 @@ func main() {
 
 	// Start background price poller (honours the config's Enabled flag)
 	poller.Start()
+	// Start background settlement runner (processes due settlements daily)
+	poller.StartSettlementRunner()
 
 	api := r.Group("/api")
 	{
@@ -97,6 +99,11 @@ func main() {
 		api.DELETE("/assets/:id", handlers.DeleteAccountAsset)
 		api.GET("/assets/:id/daily-values", handlers.GetAssetDailyValues)
 		api.POST("/assets/:id/daily-values", handlers.UpsertAssetDailyValue)
+
+		// Pending settlements
+		api.GET("/settlements", handlers.GetSettlements)
+		api.POST("/settlements/:id/settle", handlers.SettleOne)
+		api.POST("/settlements/run", handlers.RunSettlements)
 	}
 
 	r.Run(":8080")

@@ -280,6 +280,36 @@ func fetchAlphaVantage(symbol, apiKey string) (float64, error) {
 	return price, nil
 }
 
+// StartSettlementRunner launches a background goroutine that runs
+// SettlePendingTransactions once at startup and then every 24 hours.
+// It is intended to be called once from main after the store is initialised.
+func StartSettlementRunner() {
+	go runSettlements()
+}
+
+func runSettlements() {
+	// Run once at startup (picks up any settlements that became due while the
+	// service was offline).
+	triggerSettle()
+
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+	for range ticker.C {
+		triggerSettle()
+	}
+}
+
+func triggerSettle() {
+	n, err := store.SettlePendingTransactions()
+	if err != nil {
+		log.Printf("[settlement] run failed: %v", err)
+		return
+	}
+	if n > 0 {
+		log.Printf("[settlement] settled %d transaction(s)", n)
+	}
+}
+
 // httpClient is shared across all requests with a reasonable timeout.
 var httpClient = &http.Client{Timeout: 10 * time.Second}
 

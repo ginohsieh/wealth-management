@@ -206,6 +206,26 @@ CREATE TABLE IF NOT EXISTS account_group_members (
     account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
     PRIMARY KEY (group_id, account_id)
 );
+
+-- Add bank_account_id to transactions for settlement routing (nullable, backward-compatible).
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS bank_account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL;
+
+-- Pending settlement records created when a stock_buy or stock_sell transaction is booked.
+-- trade_type: 'buy' | 'sell'
+-- status:     'pending' | 'settled'
+CREATE TABLE IF NOT EXISTS pending_settlements (
+    id                    SERIAL        PRIMARY KEY,
+    transaction_id        INTEGER       NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
+    securities_account_id INTEGER       NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    bank_account_id       INTEGER       REFERENCES accounts(id) ON DELETE SET NULL,
+    trade_type            TEXT          NOT NULL,
+    amount                NUMERIC(18,4) NOT NULL,
+    market                TEXT          NOT NULL DEFAULT '',
+    trade_date            DATE          NOT NULL,
+    settlement_date       DATE          NOT NULL,
+    status                TEXT          NOT NULL DEFAULT 'pending',
+    created_at            TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+);
 `
 
 // seedIfEmpty inserts initial config only when the accounts table is empty.

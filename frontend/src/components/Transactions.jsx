@@ -31,6 +31,7 @@ function calcFeeAndTax(market, subtype, quantity, price) {
 
 const EMPTY_FORM = {
   account_id: '',
+  bank_account_id: '',
   date: today(),
   description: '',
   amount: '',
@@ -48,6 +49,7 @@ const EMPTY_FORM = {
 export default function Transactions() {
   const [transactions, setTransactions] = useState([]);
   const [accounts, setAccounts]         = useState([]);
+  const [settlements, setSettlements]   = useState([]);
   const [filterAccount, setFilterAccount] = useState('');
   const [loading, setLoading]           = useState(true);
   const [error, setError]               = useState('');
@@ -72,6 +74,13 @@ export default function Transactions() {
       .catch(() => setError('Failed to load transactions.'));
   };
 
+  const loadSettlements = () => {
+    fetch(`${API}/api/settlements?status=pending`)
+      .then(r => r.json())
+      .then(data => setSettlements(data || []))
+      .catch(() => {});
+  };
+
   useEffect(() => {
     setLoading(true);
     Promise.all([
@@ -80,6 +89,7 @@ export default function Transactions() {
       .then(([accts]) => {
         setAccounts(accts || []);
         loadTransactions('');
+        loadSettlements();
       })
       .catch(() => setError('Failed to load data.'))
       .finally(() => setLoading(false));
@@ -134,6 +144,7 @@ export default function Transactions() {
                                       - (form.tax !== '' ? payload.tax : computed.tax);
         }
         if (!payload.category) payload.category = 'Investment';
+        if (!payload.bank_account_id) delete payload.bank_account_id;
       } else {
         payload.amount = form.type === 'expense'
           ? -Math.abs(parseFloat(form.amount))
@@ -144,6 +155,7 @@ export default function Transactions() {
         delete payload.price;
         delete payload.fee;
         delete payload.tax;
+        delete payload.bank_account_id;
       }
 
       const res = await fetch(`${API}/api/transactions`, {
@@ -156,6 +168,7 @@ export default function Transactions() {
       setForm(EMPTY_FORM);
       setResolvedName('');
       loadTransactions(filterAccount);
+      loadSettlements();
     } catch {
       alert('Failed to create transaction.');
     } finally {
@@ -168,6 +181,16 @@ export default function Transactions() {
     return a ? a.name : id;
   };
 
+  const handleSettle = async (id) => {
+    try {
+      const res = await fetch(`${API}/api/settlements/${id}/settle`, { method: 'POST' });
+      if (!res.ok) throw new Error();
+      loadSettlements();
+    } catch {
+      alert('Failed to settle transaction.');
+    }
+  };
+
   const sorted = [...transactions].sort((a, b) => new Date(b.date) - new Date(a.date));
 
   if (loading) return <div className="loading">Loading transactions…</div>;
@@ -176,6 +199,57 @@ export default function Transactions() {
   return (
     <div>
       <h1 className="page-title">Transactions</h1>
+
+      {/* Pending settlements panel */}
+      {settlements.length > 0 && (
+        <div className="table-container" style={{ marginBottom: '1.5rem', borderLeft: '4px solid #ed8936' }}>
+          <div className="table-header">
+            <h2 style={{ color: '#c05621' }}>⏳ Pending Settlements ({settlements.length})</h2>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>Trade Date</th>
+                <th>Settlement Date</th>
+                <th>Type</th>
+                <th>Market</th>
+                <th>Securities Account</th>
+                <th>Bank Account</th>
+                <th>Amount</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {settlements.map(s => (
+                <tr key={s.id}>
+                  <td>{s.trade_date}</td>
+                  <td>{s.settlement_date}</td>
+                  <td>
+                    <span className={`badge ${s.trade_type === 'buy' ? 'badge-expense' : 'badge-income'}`}>
+                      {s.trade_type.toUpperCase()}
+                    </span>
+                  </td>
+                  <td>{s.market}</td>
+                  <td>{accountName(s.securities_account_id)}</td>
+                  <td>{s.bank_account_id ? accountName(s.bank_account_id) : <span style={{ color: '#a0aec0' }}>—</span>}</td>
+                  <td className={s.trade_type === 'buy' ? 'amount-negative' : 'amount-positive'}>
+                    {s.trade_type === 'buy' ? '-' : '+'}{fmt(s.amount)}
+                  </td>
+                  <td>
+                    <button
+                      className="btn btn-secondary"
+                      style={{ fontSize: '0.78rem', padding: '0.2rem 0.6rem' }}
+                      onClick={() => handleSettle(s.id)}
+                    >
+                      Settle Now
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       <div className="table-container">
         <div className="table-header">
@@ -388,7 +462,7 @@ export default function Transactions() {
               )}
 
               <div className="form-group">
-                <label>Account</label>
+                <label>{isStockTx ? 'Securities Account' : 'Account'}</label>
                 <select
                   required
                   value={form.account_id}
@@ -400,6 +474,23 @@ export default function Transactions() {
                   ))}
                 </select>
               </div>
+              {isStockTx && (
+                <div className="form-group">
+                  <label>Bank Account for Settlement (optional)</label>
+                  <select
+                    value={form.bank_account_id}
+                    onChange={e => setForm(f => ({ ...f, bank_account_id: e.target.value }))}
+                  >
+                    <option value="">— select bank account —</option>
+                    {accounts.map(a => (
+                      <option key={a.id} value={a.id}>{a.name}</option>
+                    ))}
+                  </select>
+                  <small style={{ color: '#718096' }}>
+                    Cash will be debited/credited on settlement date (T+{form.market === 'US' ? 1 : 2}).
+                  </small>
+                </div>
+              )}
               <div className="form-group">
                 <label>Date</label>
                 <input
