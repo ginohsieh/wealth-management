@@ -9,7 +9,11 @@ import (
 
 // GetTrades returns all portfolio trades, newest date first.
 func GetTrades(c *gin.Context) {
-	trades := store.GetTrades()
+	trades, err := store.GetTrades()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
 	// Sort descending by date (insertion sort on small slice)
 	for i := 1; i < len(trades); i++ {
 		for j := i; j > 0 && trades[j].Date > trades[j-1].Date; j-- {
@@ -35,12 +39,22 @@ func CreateTrade(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "quantity and price must be positive"})
 		return
 	}
-	c.JSON(http.StatusCreated, store.CreateTrade(trade))
+	created, err := store.CreateTrade(trade)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	c.JSON(http.StatusCreated, created)
 }
 
 // DeleteTrade removes a portfolio trade by ID.
 func DeleteTrade(c *gin.Context) {
-	if !store.DeleteTrade(c.Param("id")) {
+	ok, err := store.DeleteTrade(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	if !ok {
 		c.JSON(http.StatusNotFound, gin.H{"error": "trade not found"})
 		return
 	}
@@ -49,7 +63,11 @@ func DeleteTrade(c *gin.Context) {
 
 // GetHoldings returns aggregated per-symbol positions derived from all trades.
 func GetHoldings(c *gin.Context) {
-	holdings := store.GetHoldings()
+	holdings, err := store.GetHoldings()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
 	if holdings == nil {
 		holdings = []store.Holding{}
 	}
@@ -67,7 +85,10 @@ func UpdateSymbolPrice(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "price must be a positive number"})
 		return
 	}
-	store.SetSymbolPrice(symbol, body.Price)
+	if err := store.SetSymbolPrice(symbol, body.Price); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"symbol": symbol, "price": body.Price})
 }
 

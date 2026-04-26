@@ -29,7 +29,11 @@ var (
 // Start launches the background polling goroutine if enabled.
 // Safe to call multiple times; a running poller is stopped first.
 func Start() {
-	cfg := store.GetPriceConfig()
+	cfg, err := store.GetPriceConfig()
+	if err != nil {
+		log.Printf("[poller] could not read config: %v", err)
+		return
+	}
 	if !cfg.Enabled {
 		return
 	}
@@ -62,8 +66,16 @@ func Stop() {
 // Refresh fetches prices for all tracked symbols immediately, once.
 // It returns a map of symbol → new price and any errors encountered.
 func Refresh() map[string]float64 {
-	cfg := store.GetPriceConfig()
-	symbols := store.GetTrackedSymbols()
+	cfg, err := store.GetPriceConfig()
+	if err != nil {
+		log.Printf("[poller] could not read config: %v", err)
+		return nil
+	}
+	symbols, err := store.GetTrackedSymbols()
+	if err != nil {
+		log.Printf("[poller] could not read symbols: %v", err)
+		return nil
+	}
 	results := make(map[string]float64, len(symbols))
 	for _, sym := range symbols {
 		price, err := fetchPrice(sym, cfg)
@@ -71,7 +83,10 @@ func Refresh() map[string]float64 {
 			log.Printf("[poller] %s: %v", sym, err)
 			continue
 		}
-		store.SetSymbolPrice(sym, price)
+		if err := store.SetSymbolPrice(sym, price); err != nil {
+			log.Printf("[poller] %s: save price: %v", sym, err)
+			continue
+		}
 		results[sym] = price
 	}
 	return results
@@ -101,19 +116,30 @@ func run(stop <-chan struct{}, cfg store.PriceConfig) {
 		case <-ticker.C:
 			// Re-read config on each tick to pick up interval/source changes
 			// (a Restart() will be triggered for interval changes; this is belt-and-braces).
-			latestCfg := store.GetPriceConfig()
+			latestCfg, err := store.GetPriceConfig()
+			if err != nil {
+				log.Printf("[poller] could not read config: %v", err)
+				continue
+			}
 			if !latestCfg.Enabled {
 				log.Printf("[poller] disabled, stopping ticker loop")
 				return
 			}
-			symbols := store.GetTrackedSymbols()
+			symbols, err := store.GetTrackedSymbols()
+			if err != nil {
+				log.Printf("[poller] could not read symbols: %v", err)
+				continue
+			}
 			for _, sym := range symbols {
 				price, err := fetchPrice(sym, latestCfg)
 				if err != nil {
 					log.Printf("[poller] %s: %v", sym, err)
 					continue
 				}
-				store.SetSymbolPrice(sym, price)
+				if err := store.SetSymbolPrice(sym, price); err != nil {
+					log.Printf("[poller] %s: save price: %v", sym, err)
+					continue
+				}
 				log.Printf("[poller] %s = %.4f", sym, price)
 			}
 		}

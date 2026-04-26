@@ -11,3 +11,6 @@ frontend/build/
 .idea/
 *.swp
 *.swo
+
+# Environment — never commit secrets
+.env

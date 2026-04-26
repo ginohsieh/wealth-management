@@ -10,7 +10,12 @@ import (
 
 // GetPriceConfig returns the current poller configuration.
 func GetPriceConfig(c *gin.Context) {
-	c.JSON(http.StatusOK, store.GetPriceConfig())
+	cfg, err := store.GetPriceConfig()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	c.JSON(http.StatusOK, cfg)
 }
 
 // UpdatePriceConfig replaces the poller configuration and restarts the poller.
@@ -21,9 +26,17 @@ func UpdatePriceConfig(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	store.SetPriceConfig(cfg)
+	if err := store.SetPriceConfig(cfg); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
 	poller.Restart()
-	c.JSON(http.StatusOK, store.GetPriceConfig())
+	saved, err := store.GetPriceConfig()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	c.JSON(http.StatusOK, saved)
 }
 
 // ManualRefresh immediately fetches the latest prices for all tracked symbols.

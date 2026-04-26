@@ -9,5 +9,10 @@ import (
 
 // GetSummary returns the aggregate financial summary
 func GetSummary(c *gin.Context) {
-	c.JSON(http.StatusOK, store.GetSummary())
+	summary, err := store.GetSummary()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	c.JSON(http.StatusOK, summary)
 }

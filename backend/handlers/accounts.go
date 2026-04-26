@@ -9,12 +9,21 @@ import (
 
 // GetAccounts returns all accounts
 func GetAccounts(c *gin.Context) {
-	c.JSON(http.StatusOK, store.GetAccounts())
+	accounts, err := store.GetAccounts()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	c.JSON(http.StatusOK, accounts)
 }
 
 // GetAccount returns a single account by ID
 func GetAccount(c *gin.Context) {
-	account, ok := store.GetAccountByID(c.Param("id"))
+	account, ok, err := store.GetAccountByID(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
 	if !ok {
 		c.JSON(http.StatusNotFound, gin.H{"error": "account not found"})
 		return
@@ -29,7 +38,12 @@ func CreateAccount(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusCreated, store.CreateAccount(account))
+	created, err := store.CreateAccount(account)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	c.JSON(http.StatusCreated, created)
 }
 
 // UpdateAccount replaces an existing account
@@ -39,7 +53,11 @@ func UpdateAccount(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	updated, ok := store.UpdateAccount(c.Param("id"), account)
+	updated, ok, err := store.UpdateAccount(c.Param("id"), account)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
 	if !ok {
 		c.JSON(http.StatusNotFound, gin.H{"error": "account not found"})
 		return
@@ -49,7 +67,12 @@ func UpdateAccount(c *gin.Context) {
 
 // DeleteAccount removes an account by ID
 func DeleteAccount(c *gin.Context) {
-	if !store.DeleteAccount(c.Param("id")) {
+	ok, err := store.DeleteAccount(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	if !ok {
 		c.JSON(http.StatusNotFound, gin.H{"error": "account not found"})
 		return
 	}

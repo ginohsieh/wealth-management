@@ -9,7 +9,12 @@ import (
 
 // GetPortfolio returns all portfolio assets
 func GetPortfolio(c *gin.Context) {
-	c.JSON(http.StatusOK, store.GetAssets())
+	assets, err := store.GetAssets()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	c.JSON(http.StatusOK, assets)
 }
 
 // CreateAsset adds a new asset to the portfolio
@@ -19,7 +24,12 @@ func CreateAsset(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusCreated, store.CreateAsset(asset))
+	created, err := store.CreateAsset(asset)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	c.JSON(http.StatusCreated, created)
 }
 
 // UpdateAsset replaces an existing portfolio asset
@@ -29,7 +39,11 @@ func UpdateAsset(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	updated, ok := store.UpdateAsset(c.Param("id"), asset)
+	updated, ok, err := store.UpdateAsset(c.Param("id"), asset)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
 	if !ok {
 		c.JSON(http.StatusNotFound, gin.H{"error": "asset not found"})
 		return
@@ -39,7 +53,12 @@ func UpdateAsset(c *gin.Context) {
 
 // DeleteAsset removes an asset from the portfolio
 func DeleteAsset(c *gin.Context) {
-	if !store.DeleteAsset(c.Param("id")) {
+	ok, err := store.DeleteAsset(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	if !ok {
 		c.JSON(http.StatusNotFound, gin.H{"error": "asset not found"})
 		return
 	}

@@ -9,7 +9,11 @@ import (
 
 // GetTransactions returns all transactions, with optional account_id filter
 func GetTransactions(c *gin.Context) {
-	txns := store.GetTransactions(c.Query("account_id"))
+	txns, err := store.GetTransactions(c.Query("account_id"))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
 	if txns == nil {
 		txns = []store.Transaction{}
 	}
@@ -23,5 +27,10 @@ func CreateTransaction(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusCreated, store.CreateTransaction(t))
+	created, err := store.CreateTransaction(t)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	c.JSON(http.StatusCreated, created)
 }

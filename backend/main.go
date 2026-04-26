@@ -1,13 +1,32 @@
 package main
 
 import (
+	"log"
+
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	"github.com/ginohsieh/wealth-management/backend/db"
 	"github.com/ginohsieh/wealth-management/backend/handlers"
 	"github.com/ginohsieh/wealth-management/backend/poller"
+	"github.com/ginohsieh/wealth-management/backend/store"
 )
 
 func main() {
+	// Initialize database connection
+	database, err := db.Open()
+	if err != nil {
+		log.Fatalf("failed to connect to database: %v", err)
+	}
+	defer database.Close()
+
+	// Create schema and seed initial data when the database is empty
+	if err := db.Migrate(database); err != nil {
+		log.Fatalf("database migration failed: %v", err)
+	}
+
+	// Wire the database into the store layer
+	store.Init(database)
+
 	r := gin.Default()
 
 	// Allow all origins for local development

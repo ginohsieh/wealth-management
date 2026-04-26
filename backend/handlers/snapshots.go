@@ -10,7 +10,11 @@ import (
 
 // GetSnapshots returns all daily net worth snapshots, newest first.
 func GetSnapshots(c *gin.Context) {
-	snaps := store.GetSnapshots()
+	snaps, err := store.GetSnapshots()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
 	// Sort descending by date in-place (simple insertion sort on small slice)
 	for i := 1; i < len(snaps); i++ {
 		for j := i; j > 0 && snaps[j].Date > snaps[j-1].Date; j-- {
@@ -31,6 +35,10 @@ func RecordSnapshot(c *gin.Context) {
 	if body.Date == "" {
 		body.Date = time.Now().Format("2006-01-02")
 	}
-	snap := store.RecordSnapshot(body.Date)
+	snap, err := store.RecordSnapshot(body.Date)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
 	c.JSON(http.StatusCreated, snap)
 }
