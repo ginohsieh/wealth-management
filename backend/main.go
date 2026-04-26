@@ -70,6 +70,9 @@ func main() {
 		api.PUT("/portfolio/holdings/:symbol/price", handlers.UpdateSymbolPrice)
 		api.POST("/portfolio/calc-fees", handlers.CalcFeeAndTax)
 
+		// Symbol name lookup (cache → Yahoo Finance)
+		api.GET("/symbol/:symbol/name", handlers.LookupSymbolName)
+
 		// Price polling configuration
 		api.GET("/price-config", handlers.GetPriceConfig)
 		api.PUT("/price-config", handlers.UpdatePriceConfig)

@@ -142,6 +142,12 @@ CREATE TABLE IF NOT EXISTS price_config (
     enabled          BOOLEAN NOT NULL DEFAULT TRUE
 );
 
+CREATE TABLE IF NOT EXISTS symbol_names (
+    symbol     TEXT        PRIMARY KEY,
+    name       TEXT        NOT NULL,
+    fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS account_groups (
     id          SERIAL PRIMARY KEY,
     name        TEXT   NOT NULL,

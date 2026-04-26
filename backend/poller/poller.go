@@ -159,6 +159,36 @@ func fetchPrice(symbol string, cfg store.PriceConfig) (float64, error) {
 // fetchYahoo uses the Yahoo Finance v8 chart API (no API key needed).
 // URL: https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=1d
 func fetchYahoo(symbol string) (float64, error) {
+	payload, err := fetchYahooPayload(symbol)
+	if err != nil {
+		return 0, err
+	}
+	price := payload.Chart.Result[0].Meta.RegularMarketPrice
+	if price <= 0 {
+		return 0, fmt.Errorf("yahoo: invalid price %.4f for %s", price, symbol)
+	}
+	return price, nil
+}
+
+// FetchSymbolName queries the Yahoo Finance chart API to get the company name for a symbol.
+// It returns longName when available, then shortName, falling back to an error.
+func FetchSymbolName(symbol string) (string, error) {
+	payload, err := fetchYahooPayload(symbol)
+	if err != nil {
+		return "", err
+	}
+	meta := payload.Chart.Result[0].Meta
+	if meta.LongName != "" {
+		return meta.LongName, nil
+	}
+	if meta.ShortName != "" {
+		return meta.ShortName, nil
+	}
+	return "", fmt.Errorf("yahoo: no name returned for %s", symbol)
+}
+
+// fetchYahooPayload is the shared HTTP + parse layer used by fetchYahoo and FetchSymbolName.
+func fetchYahooPayload(symbol string) (*yahooChartPayload, error) {
 	url := fmt.Sprintf(
 		"https://query1.finance.yahoo.com/v8/finance/chart/%s?interval=1d&range=1d",
 		symbol,
@@ -168,47 +198,47 @@ func fetchYahoo(symbol string) (float64, error) {
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return 0, fmt.Errorf("yahoo request: %w", err)
+		return nil, fmt.Errorf("yahoo request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("yahoo HTTP %d for %s", resp.StatusCode, symbol)
+		return nil, fmt.Errorf("yahoo HTTP %d for %s", resp.StatusCode, symbol)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxYahooBody))
 	if err != nil {
-		return 0, fmt.Errorf("yahoo read body: %w", err)
+		return nil, fmt.Errorf("yahoo read body: %w", err)
 	}
 
-	// Parse: chart.result[0].meta.regularMarketPrice
-	var payload struct {
-		Chart struct {
-			Result []struct {
-				Meta struct {
-					RegularMarketPrice float64 `json:"regularMarketPrice"`
-				} `json:"meta"`
-			} `json:"result"`
-			Error *struct {
-				Code        string `json:"code"`
-				Description string `json:"description"`
-			} `json:"error"`
-		} `json:"chart"`
-	}
+	var payload yahooChartPayload
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return 0, fmt.Errorf("yahoo parse: %w", err)
+		return nil, fmt.Errorf("yahoo parse: %w", err)
 	}
 	if payload.Chart.Error != nil {
-		return 0, fmt.Errorf("yahoo API error %s: %s", payload.Chart.Error.Code, payload.Chart.Error.Description)
+		return nil, fmt.Errorf("yahoo API error %s: %s", payload.Chart.Error.Code, payload.Chart.Error.Description)
 	}
 	if len(payload.Chart.Result) == 0 {
-		return 0, fmt.Errorf("yahoo: no data for %s", symbol)
+		return nil, fmt.Errorf("yahoo: no data for %s", symbol)
 	}
-	price := payload.Chart.Result[0].Meta.RegularMarketPrice
-	if price <= 0 {
-		return 0, fmt.Errorf("yahoo: invalid price %.4f for %s", price, symbol)
-	}
-	return price, nil
+	return &payload, nil
+}
+
+// yahooChartPayload is the JSON structure returned by the Yahoo Finance chart API.
+type yahooChartPayload struct {
+	Chart struct {
+		Result []struct {
+			Meta struct {
+				RegularMarketPrice float64 `json:"regularMarketPrice"`
+				LongName           string  `json:"longName"`
+				ShortName          string  `json:"shortName"`
+			} `json:"meta"`
+		} `json:"result"`
+		Error *struct {
+			Code        string `json:"code"`
+			Description string `json:"description"`
+		} `json:"error"`
+	} `json:"chart"`
 }
 
 // fetchAlphaVantage uses the Alpha Vantage GLOBAL_QUOTE endpoint.

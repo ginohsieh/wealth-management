@@ -17,7 +17,7 @@ const MARKETS = [
 ];
 
 const EMPTY_TRADE = {
-  symbol: '', name: '', type: 'buy', date: today(),
+  symbol: '', type: 'buy', date: today(),
   quantity: '', price: '', market: 'US', fee: '', tax: '', notes: '', account_id: '',
 };
 
@@ -65,6 +65,9 @@ export default function Portfolio() {
   const [savingCfg, setSavingCfg]       = useState(false);
   const [refreshing, setRefreshing]     = useState(false);
   const [refreshResult, setRefreshResult] = useState(null);
+  // company name resolved from the symbol field
+  const [resolvedName, setResolvedName]   = useState('');
+  const [resolvingName, setResolvingName] = useState(false);
 
   const loadHoldings = useCallback(() => {
     const url = accountFilter
@@ -110,6 +113,20 @@ export default function Portfolio() {
 
   const handleFormChange = (field, value) =>
     setForm(f => ({ ...f, [field]: value }));
+
+  const handleSymbolBlur = async (symbol) => {
+    if (!symbol) { setResolvedName(''); return; }
+    setResolvingName(true);
+    try {
+      const res = await fetch(`${API}/api/symbol/${encodeURIComponent(symbol)}/name`);
+      if (res.ok) {
+        const data = await res.json();
+        setResolvedName(data.name || '');
+      }
+    } catch { /* silent */ } finally {
+      setResolvingName(false);
+    }
+  };
 
   const handleSavePriceConfig = async (e) => {
     e.preventDefault();
@@ -170,6 +187,7 @@ export default function Portfolio() {
       if (!res.ok) throw new Error();
       setShowModal(false);
       setForm(EMPTY_TRADE);
+      setResolvedName('');
       loadAll();
     } catch {
       alert('Failed to record trade.');
@@ -526,9 +544,16 @@ export default function Portfolio() {
                   <input
                     required
                     value={form.symbol}
-                    onChange={e => handleFormChange('symbol', e.target.value.toUpperCase())}
+                    onChange={e => { handleFormChange('symbol', e.target.value.toUpperCase()); setResolvedName(''); }}
+                    onBlur={e => handleSymbolBlur(e.target.value)}
                     placeholder="e.g. AAPL"
                   />
+                  {resolvingName && (
+                    <small style={{ color: '#718096', marginTop: '0.25rem', display: 'block' }}>Looking up company…</small>
+                  )}
+                  {resolvedName && !resolvingName && (
+                    <small style={{ color: '#38a169', marginTop: '0.25rem', display: 'block' }}>✓ {resolvedName}</small>
+                  )}
                 </div>
                 <div className="form-group">
                   <label>Type</label>
@@ -540,16 +565,6 @@ export default function Portfolio() {
                     <option value="sell">Sell</option>
                   </select>
                 </div>
-              </div>
-
-              <div className="form-group">
-                <label>Company Name</label>
-                <input
-                  required
-                  value={form.name}
-                  onChange={e => handleFormChange('name', e.target.value)}
-                  placeholder="e.g. Apple Inc."
-                />
               </div>
 
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 1rem' }}>
@@ -690,7 +705,7 @@ export default function Portfolio() {
               </div>
 
               <div className="form-actions">
-                <button type="button" className="btn btn-secondary" onClick={() => setShowModal(false)}>
+                <button type="button" className="btn btn-secondary" onClick={() => { setShowModal(false); setResolvedName(''); }}>
                   Cancel
                 </button>
                 <button type="submit" className="btn btn-primary" disabled={saving}>

@@ -496,6 +496,31 @@ syms = append(syms, s)
 return syms, rows.Err()
 }
 
+// GetSymbolName looks up a company name from the symbol_names cache.
+// Returns (name, true, nil) when found, ("", false, nil) when not cached.
+func GetSymbolName(symbol string) (string, bool, error) {
+var name string
+err := db.QueryRow(`SELECT name FROM symbol_names WHERE symbol = $1`, symbol).Scan(&name)
+if err == sql.ErrNoRows {
+return "", false, nil
+}
+if err != nil {
+return "", false, err
+}
+return name, true, nil
+}
+
+// SetSymbolName upserts a symbol → company name mapping in the symbol_names cache.
+func SetSymbolName(symbol, name string) error {
+_, err := db.Exec(
+`INSERT INTO symbol_names(symbol, name, fetched_at)
+ VALUES($1,$2,NOW())
+ ON CONFLICT(symbol) DO UPDATE SET name=$2, fetched_at=NOW()`,
+symbol, name,
+)
+return err
+}
+
 // computeHoldings loads trades and symbol prices from the DB and aggregates
 // them into per-symbol holdings. Optionally filtered by accountID.
 func computeHoldings(accountID string) ([]Holding, error) {
